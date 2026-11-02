@@ -17,8 +17,21 @@ import { identifier, literal } from "./database.ts";
 /** Names the semantic and raw relations take in schema `src`; caller tables cannot reuse them. */
 export const SOURCE_RELATIONS: readonly string[] = ["files", "entries", "sessions", "transcripts", "events"];
 
-/** Largest single JSONL line the entries view reads; transcripts here hold lines over 200 MB. */
-const MAX_LINE_BYTES = 1 << 30;
+/**
+ * Slack above a file's size for the longest line DuckDB may meet in it: a
+ * transcript still being written grows while the call runs.
+ */
+const LINE_SLACK_BYTES = 16 << 20;
+
+/**
+ * One file's scan for src.entries. DuckDB sizes every read buffer by
+ * maximum_object_size, so a single corpus-wide bound (transcripts here hold
+ * lines over 200 MB) runs a multi-file scan out of memory; each file is read
+ * with a bound from its own size instead.
+ */
+function entriesScan(file: TranscriptRow): string {
+	return `SELECT filename AS file, json FROM read_json([${literal(file.file)}], format = 'newline_delimited', records = false, columns = {'json': 'JSON'}, filename = true, maximum_object_size = ${file.bytes + LINE_SLACK_BYTES})`;
+}
 
 type ColumnType = "VARCHAR" | "BIGINT" | "DOUBLE" | "BOOLEAN" | "JSON";
 type Cell = string | number | boolean | null;
@@ -233,9 +246,9 @@ async function sessionRelations(
 	await createTable(connection, "sessions", SESSIONS, sessions);
 	await createTable(connection, "transcripts", TRANSCRIPTS, transcripts);
 	await createTable(connection, "events", EVENTS, events);
-	const paths = files.map((file) => literal(file.file)).join(", ");
+	const scans = files.length === 0 ? ["SELECT NULL::VARCHAR AS file, NULL::JSON AS json WHERE false"] : files.map(entriesScan);
 	await connection.run(
-		`CREATE VIEW src.entries AS SELECT filename AS file, json, json->>'type' AS type, json->>'id' AS id, json->>'parentId' AS parent_id, json->>'timestamp' AS t FROM read_json([${paths}], format = 'newline_delimited', records = false, columns = {'json': 'JSON'}, filename = true, maximum_object_size = ${MAX_LINE_BYTES})`,
+		`CREATE VIEW src.entries AS SELECT file, json, json->>'type' AS type, json->>'id' AS id, json->>'parentId' AS parent_id, json->>'timestamp' AS t FROM (${scans.join(" UNION ALL ")})`,
 	);
 }
 
