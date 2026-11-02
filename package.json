@@ -1,0 +1,40 @@
+{
+	"name": "omp-sessions",
+	"version": "0.1.0",
+	"description": "Reads the omp sessions on this machine: the session:// URL scheme for read and grep, and session_query for SQL over the session files from eval",
+	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/oh-my-omp/omp-sessions.git"
+	},
+	"files": [
+		"index.ts",
+		"src"
+	],
+	"omp": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"scripts": {
+		"check": "biome check . && tsc --noEmit",
+		"format": "biome check --write .",
+		"test": "bun test"
+	},
+	"dependencies": {
+		"@duckdb/node-api": "latest"
+	},
+	"peerDependencies": {
+		"@oh-my-pi/pi-coding-agent": "*",
+		"@oh-my-pi/pi-natives": "*",
+		"@oh-my-pi/pi-utils": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "latest",
+		"@oh-my-pi/pi-coding-agent": "latest",
+		"@oh-my-pi/pi-natives": "latest",
+		"@oh-my-pi/pi-utils": "latest",
+		"@types/bun": "latest",
+		"typescript": "latest"
+	}
+}
