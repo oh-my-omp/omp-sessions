@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Reads the omp sessions on this machine (`~/.omp/agent/sessions`): the `session://` scheme lets `read` and `grep` open other sessions without locating JSONL files by hand, and the `session_query` device lets eval cells query the same history in JavaScript and SQL.
+Reads the omp sessions on this machine (`~/.omp/agent/sessions`): the `session://` scheme lets `read` and `grep` open other sessions without locating JSONL files by hand, and the `session_query` tool lets eval cells query the same history in JavaScript and SQL.
 
 ## Install
 
@@ -23,7 +23,7 @@ A read-only internal-URL scheme registered in omp's process-global URL router, s
 
 ## `session_query`
 
-An `xd://` device. Eval cells call it as `(await tool.session_query({ action, … })).details`, in JavaScript or Python.
+A tool eval cells call as `(await tool.session_query({ action, … })).details`, in JavaScript or Python.
 
 | action | result |
 |---|---|
@@ -36,7 +36,7 @@ An `xd://` device. Eval cells call it as `(await tool.session_query({ action, �
 - **Online**: each `sql` call builds schema `src` for the sessions it names, from the session files as they are then, and drops it when the call ends. `src.entries` reads every JSONL line in place on disk; `src.events`, `src.transcripts` and `src.sessions` come from the same loaders as `session://`, so they follow the active branch, complete tool calls from their results and carry recaps. No copy of the sessions is kept.
 - **Intermediate results**: tables, views and macros created in schema `main` stay in that session's in-memory database for later calls; `/new`, resume, fork or ending the session discard them. Rows from a cell join a query as `src.<name>` through `tables`.
 - **Limits on SQL**: queries and changes to the database's own objects run; COPY, EXPORT, ATTACH, INSTALL, LOAD, SET, PRAGMA, CALL and other engine or file statements are refused. SQL reads files only below the sessions directory and writes none; `export` writes a file, never below the sessions directory, and asks for write approval.
-- Call contracts are the device topics `xd://session_query/actions` and `xd://session_query/sql` (`src/query/topics/`).
+- Call contracts are the tool topics `xd://session_query/actions` and `xd://session_query/sql` (`src/query/topics/`).
 
 Tool labels follow the UI language: `OMOMP_LANG` (`en` or `zh`), then `LC_ALL` / `LC_MESSAGES` / `LANG`, then English. Descriptions, topics and results stay English.
 

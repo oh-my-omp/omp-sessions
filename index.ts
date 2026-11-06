@@ -10,7 +10,7 @@
  * and subagent sessions alike; never replaces an omp-owned scheme or another host's handler, and
  * a newer copy of this module replaces its own earlier registration.
  *
- * `session_query` (src/query/tool.ts): an xd device eval cells call as `tool.session_query`.
+ * `session_query` (src/query/tool.ts): a top-level tool eval cells call as `tool.session_query`.
  * Registered synchronously at factory load with `defaultInactive`, and activated in
  * `session_start` with `setActiveTools`, ordered by `getAllTools()` registration order, so the
  * base system prompt stays the same across `/restart` and the prompt cache survives it.
