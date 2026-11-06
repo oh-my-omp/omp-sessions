@@ -38,7 +38,7 @@ An `xd://` device. Eval cells call it as `(await tool.session_query({ action, â€
 - **Limits on SQL**: queries and changes to the database's own objects run; COPY, EXPORT, ATTACH, INSTALL, LOAD, SET, PRAGMA, CALL and other engine or file statements are refused. SQL reads files only below the sessions directory and writes none; `export` writes a file, never below the sessions directory, and asks for write approval.
 - Call contracts are the device topics `xd://session_query/actions` and `xd://session_query/sql` (`src/query/topics/`).
 
-Tool labels follow the UI language: `OMOMP_LANG` (`en` or `zh`), then the `omomp-lang` section of the single `omomp.{yml,yaml,json,toml}` in the agent directory, then `LC_ALL` / `LC_MESSAGES` / `LANG`, then English. Descriptions, topics and results stay English.
+Tool labels follow the UI language: `OMOMP_LANG` (`en` or `zh`), then `LC_ALL` / `LC_MESSAGES` / `LANG`, then English. Descriptions, topics and results stay English.
 
 ## Host coupling
 
