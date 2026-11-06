@@ -10,7 +10,10 @@
  * and subagent sessions alike; never replaces an omp-owned scheme or another host's handler, and
  * a newer copy of this module replaces its own earlier registration.
  *
- * `session_query` (src/query/tool.ts): an xd device eval cells call as `tool.session_query`.
+ * `session_query` (src/query/tool.ts): a top-level tool eval cells call as `tool.session_query`.
+ * Registered synchronously at factory load with `defaultInactive`, and activated in
+ * `session_start` with `setActiveTools`, ordered by `getAllTools()` registration order, so the
+ * base system prompt stays the same across `/restart` and the prompt cache survives it.
  * `sessions`, `agents` and `events` return rows; `sql` runs DuckDB on the calling session's
  * in-memory database (src/query/database.ts) with the call's relations in schema `src`, rebuilt
  * from the session files on every call and dropped after it (src/query/sources.ts); tables the
@@ -21,15 +24,15 @@
  * jq (removed before the read returns) and the files `export` is asked to write. Never writes
  * below the sessions directory.
  *
- * Failure policy: hooks and tools never throw into omp; registration errors are logged with
- * `pi.logger.warn`, query failures come back as tool errors.
+ * Failure policy: hooks and tools never throw into omp; registration and activation errors are
+ * logged with `pi.logger.warn`, query failures come back as tool errors.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { errorText } from "./src/errors.ts";
 import { HANDLER_MARK, SessionUrlHandler } from "./src/handler.ts";
 import { router } from "./src/omp-adapter.ts";
 import { SessionDatabases } from "./src/query/database.ts";
-import { sessionQueryTool } from "./src/query/tool.ts";
+import { sessionQueryTool, TOOL } from "./src/query/tool.ts";
 
 function registerScheme(pi: ExtensionAPI): void {
 	const routes = router();
@@ -52,7 +55,19 @@ export default function ompSessions(pi: ExtensionAPI): void {
 		pi.logger.warn("omp-sessions: session:// registration failed", { error: errorText(error) });
 	}
 	const databases = new SessionDatabases();
-	pi.registerTool(sessionQueryTool(databases));
+	pi.registerTool({ ...sessionQueryTool(databases), defaultInactive: true });
+	pi.on("session_start", async () => {
+		try {
+			const active = new Set(pi.getActiveTools());
+			const names = pi
+				.getAllTools()
+				.map((tool) => tool.name)
+				.filter((name) => active.has(name) || name === TOOL);
+			await pi.setActiveTools(names);
+		} catch (error) {
+			pi.logger.warn("omp-sessions: session_query activation failed", { error: errorText(error) });
+		}
+	});
 	pi.on("session_switch", () => databases.close());
 	pi.on("session_shutdown", () => databases.close());
 }

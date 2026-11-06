@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-读取本机的 omp 会话（`~/.omp/agent/sessions`）：`session://` scheme 让 `read` 与 `grep` 直接打开其他会话，不必手动定位 JSONL 文件；`session_query` 设备让 eval 单元用 JavaScript 和 SQL 查询同一份历史。
+读取本机的 omp 会话（`~/.omp/agent/sessions`）：`session://` scheme 让 `read` 与 `grep` 直接打开其他会话，不必手动定位 JSONL 文件；`session_query` 工具让 eval 单元用 JavaScript 和 SQL 查询同一份历史。
 
 ## 安装
 
@@ -23,7 +23,7 @@ omp install https://github.com/oh-my-omp/omp-sessions
 
 ## `session_query`
 
-`xd://` 设备。eval 单元以 `(await tool.session_query({ action, … })).details` 调用，JavaScript 与 Python 都可以。
+一个工具。eval 单元以 `(await tool.session_query({ action, … })).details` 调用，JavaScript 与 Python 都可以。
 
 | action | 结果 |
 |---|---|
@@ -36,7 +36,7 @@ omp install https://github.com/oh-my-omp/omp-sessions
 - **在线计算**：每次 `sql` 调用按点名的会话，从当时的会话文件建出 schema `src`，调用结束即删除。`src.entries` 直接在磁盘上原地读取每一行 JSONL；`src.events`、`src.transcripts`、`src.sessions` 来自与 `session://` 相同的加载器，因此按当前分支、用结果补全工具调用、带 recap。不保留任何会话副本。
 - **中间结果**：在 schema `main` 里建的表、视图和宏保存在该会话的内存数据库里，后续调用可用；`/new`、resume、fork 或会话结束时清空。单元里的行经 `tables` 以 `src.<name>` 参与查询。
 - **SQL 的边界**：允许查询和修改数据库自身的对象；COPY、EXPORT、ATTACH、INSTALL、LOAD、SET、PRAGMA、CALL 等引擎或文件语句一律拒绝。SQL 只能读会话目录下的文件，不能写任何文件；`export` 才写文件，从不写进会话目录，并申请 write 审批。
-- 调用约定见设备专题 `xd://session_query/actions` 与 `xd://session_query/sql`（`src/query/topics/`）。
+- 调用约定见工具专题 `xd://session_query/actions` 与 `xd://session_query/sql`（`src/query/topics/`）。
 
 工具标签跟随界面语言：`OMOMP_LANG`（`en` 或 `zh`），其次是 `LC_ALL` / `LC_MESSAGES` / `LANG`，最后是英文。模型读的说明、专题和结果保持英文。
 
