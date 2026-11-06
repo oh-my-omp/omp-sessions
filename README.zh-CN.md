@@ -38,7 +38,7 @@ omp install https://github.com/oh-my-omp/omp-sessions
 - **SQL 的边界**：允许查询和修改数据库自身的对象；COPY、EXPORT、ATTACH、INSTALL、LOAD、SET、PRAGMA、CALL 等引擎或文件语句一律拒绝。SQL 只能读会话目录下的文件，不能写任何文件；`export` 才写文件，从不写进会话目录，并申请 write 审批。
 - 调用约定见设备专题 `xd://session_query/actions` 与 `xd://session_query/sql`（`src/query/topics/`）。
 
-工具标签跟随界面语言：`OMOMP_LANG`（`en` 或 `zh`），其次是 agent 目录下唯一的 `omomp.{yml,yaml,json,toml}` 的 `omomp-lang` 段，再次是 `LC_ALL` / `LC_MESSAGES` / `LANG`，最后是英文。模型读的说明、专题和结果保持英文。
+工具标签跟随界面语言：`OMOMP_LANG`（`en` 或 `zh`），其次是 `LC_ALL` / `LC_MESSAGES` / `LANG`，最后是英文。模型读的说明、专题和结果保持英文。
 
 ## 宿主耦合
 
