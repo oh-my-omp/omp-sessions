@@ -12,8 +12,9 @@
  *
  * `session_query` (src/query/tool.ts): a top-level tool eval cells call as `tool.session_query`.
  * Registered synchronously at factory load with `defaultInactive`, and activated in
- * `session_start` with `setActiveTools`, ordered by `getAllTools()` registration order, so the
- * base system prompt stays the same across `/restart` and the prompt cache survives it.
+ * `session_start` through `applyActiveTools` (src/active-tools.ts), which orders names by a
+ * canonical rule (builtins first in registry order, others sorted by name), so the base system
+ * prompt stays the same across `/restart` and the prompt cache survives it.
  * `sessions`, `agents` and `events` return rows; `sql` runs DuckDB on the calling session's
  * in-memory database (src/query/database.ts) with the call's relations in schema `src`, rebuilt
  * from the session files on every call and dropped after it (src/query/sources.ts); tables the
@@ -28,6 +29,7 @@
  * logged with `pi.logger.warn`, query failures come back as tool errors.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { applyActiveTools } from "./src/active-tools.ts";
 import { errorText } from "./src/errors.ts";
 import { HANDLER_MARK, SessionUrlHandler } from "./src/handler.ts";
 import { router } from "./src/omp-adapter.ts";
@@ -63,7 +65,7 @@ export default function ompSessions(pi: ExtensionAPI): void {
 				.getAllTools()
 				.map((tool) => tool.name)
 				.filter((name) => active.has(name) || name === TOOL);
-			await pi.setActiveTools(names);
+			await applyActiveTools(pi, names);
 		} catch (error) {
 			pi.logger.warn("omp-sessions: session_query activation failed", { error: errorText(error) });
 		}
