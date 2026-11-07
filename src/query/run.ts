@@ -6,7 +6,7 @@
 // engine that runs no caller SQL.
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type DuckDBConnection, DuckDBInstance, type Json, StatementType } from "@duckdb/node-api";
+import { type DuckDBConnection, DuckDBInstance, type Json, JsonDuckDBValueConverter, StatementType } from "@duckdb/node-api";
 import { getSessionsDir } from "../omp-adapter.ts";
 import { identifier, literal } from "./database.ts";
 
@@ -29,14 +29,38 @@ export type SqlResult =
 	| { readonly kind: "rows"; readonly columns: readonly string[]; readonly rows: Record<string, Json>[]; readonly truncated: boolean }
 	| { readonly kind: "changes"; readonly changes: number };
 
+/**
+ * Characters one `sql` result may spend: `limit` bounds the row count, the
+ * budget bounds what those rows hold, so a single huge cell (one transcript
+ * line can be 200 MB) never reaches the caller. Counted per value without
+ * serializing a row: a string by its length, a number, boolean or null by its
+ * JSON text, and a list or struct by its values recursively.
+ */
+const RESULT_CHAR_BUDGET = 16 * 1024 * 1024;
+
+function valueChars(value: Json): number {
+	if (value === null) return 4;
+	if (typeof value === "string") return value.length;
+	if (typeof value === "number") return String(value).length;
+	if (typeof value === "boolean") return value ? 4 : 5;
+	let chars = 0;
+	if (Array.isArray(value)) {
+		for (const item of value) chars += valueChars(item);
+		return chars;
+	}
+	for (const item of Object.values(value)) chars += valueChars(item);
+	return chars;
+}
+
 function statementName(type: StatementType): string {
 	return StatementType[type] ?? String(type);
 }
 
 /**
  * Runs every statement of `query` in order and returns the last one's result:
- * at most `limit` rows when it returns rows, else the number of rows it changed.
- * `params` bind the only statement; a script with parameters is refused.
+ * at most `limit` rows when it returns rows, within the character budget, else
+ * the number of rows it changed. `truncated` reports that a row was not
+ * returned. `params` bind the only statement; a script with parameters is refused.
  */
 export async function runSql(connection: DuckDBConnection, query: string, params: Bindings | null, limit: number): Promise<SqlResult> {
 	const extracted = await connection.extractStatements(query);
@@ -53,10 +77,45 @@ export async function runSql(connection: DuckDBConnection, query: string, params
 			continue;
 		}
 		if (prepared.columnCount === 0) return { kind: "changes", changes: (await prepared.run()).rowsChanged };
-		const reader = await prepared.streamAndReadUntil(limit + 1);
-		const rows = reader.getRowObjectsJson();
-		reader.closeSync();
-		return { kind: "rows", columns: reader.columnNames(), rows: rows.slice(0, limit), truncated: rows.length > limit };
+		// Chunks are read one at a time and converted one row at a time, so a
+		// result is never materialized whole: the previous shape fetched every
+		// row as JSON and then copied the array with slice.
+		const result = await prepared.stream();
+		try {
+			const columns = result.columnNames();
+			const names = result.deduplicatedColumnNames();
+			const rows: Record<string, Json>[] = [];
+			let chars = 0;
+			let truncated = false;
+			let chunk = await result.fetchChunk();
+			while (chunk !== null && chunk.rowCount > 0 && !truncated) {
+				const rowCount = chunk.rowCount;
+				for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+					if (rows.length === limit) {
+						truncated = true;
+						break;
+					}
+					const row: Record<string, Json> = {};
+					let rowChars = 0;
+					chunk.visitRowValues(rowIndex, (value, _rowIndex, columnIndex, type) => {
+						const converted = JsonDuckDBValueConverter(value, type, JsonDuckDBValueConverter);
+						rowChars += valueChars(converted);
+						const name = names[columnIndex];
+						if (name !== undefined) row[name] = converted;
+					});
+					if (chars + rowChars > RESULT_CHAR_BUDGET) {
+						truncated = true;
+						break;
+					}
+					rows.push(row);
+					chars += rowChars;
+				}
+				if (!truncated) chunk = await result.fetchChunk();
+			}
+			return { kind: "rows", columns, rows, truncated };
+		} finally {
+			result.closeSync();
+		}
 	}
 	throw new Error("query holds no statement");
 }
