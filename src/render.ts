@@ -354,22 +354,24 @@ function eventFields(event: SessionEvent): Record<string, unknown> {
 	}
 }
 
-/** One JSON object per event that `filter` shows, for jq. */
-export function eventRecords(loaded: LoadedSession, base: string, filter: EventFilter): Array<Record<string, unknown>> {
+/** One JSON object per event that `filter` shows, for jq, produced as the caller reads them. */
+export function* eventRecords(loaded: LoadedSession, base: string, filter: EventFilter): Generator<Record<string, unknown>> {
 	const { meta } = loaded;
-	const events = loaded.events.filter((event) => shows(filter, event));
-	return events.map((event) => ({
-		sid: meta.sid,
-		agent: meta.agent,
-		turn: event.turn,
-		t: event.t,
-		kind: event.kind,
-		entry: event.entry,
-		block: event.block,
-		line: event.line,
-		...eventFields(event),
-		url: `${base}/entry/${event.entry}`,
-	}));
+	for (const event of loaded.events) {
+		if (!shows(filter, event)) continue;
+		yield {
+			sid: meta.sid,
+			agent: meta.agent,
+			turn: event.turn,
+			t: event.t,
+			kind: event.kind,
+			entry: event.entry,
+			block: event.block,
+			line: event.line,
+			...eventFields(event),
+			url: `${base}/entry/${event.entry}`,
+		};
+	}
 }
 
 function contentText(value: Projected | undefined): string | null {

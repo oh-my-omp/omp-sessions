@@ -6,8 +6,8 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadEntry, loadSession } from "./events.ts";
-import { type EventFilter, parseTypeFilter, type TypeFilter } from "./filter.ts";
+import { loadEntry } from "./events.ts";
+import { loadFiltered, parseTypeFilter, type TypeFilter } from "./filter.ts";
 import {
 	executeJsonQuery,
 	getSessionsDir,
@@ -39,7 +39,7 @@ import {
 	type SessionRef,
 	type Target,
 } from "./routes.ts";
-import { parseWindow, resolveWindow, type WindowSpec, windowQuery } from "./window.ts";
+import { parseWindow, type WindowSpec, windowQuery } from "./window.ts";
 
 export const HANDLER_MARK = Symbol.for("omp-sessions.session-urls.handler.v1");
 
@@ -84,8 +84,8 @@ function text(url: string, content: string): InternalResource {
 	return { url, content, contentType: "text/plain", size: Buffer.byteLength(content) };
 }
 
-function jsonl(records: readonly unknown[]): string {
-	return records.map((record) => JSON.stringify(record)).join("\n");
+function jsonl(records: Iterable<unknown>): string {
+	return Array.from(records, (record) => JSON.stringify(record)).join("\n");
 }
 
 /**
@@ -95,7 +95,7 @@ function jsonl(records: readonly unknown[]): string {
  */
 async function jsonlResource(
 	url: InternalUrl,
-	records: readonly unknown[],
+	records: Iterable<unknown>,
 	signal: AbortSignal | undefined,
 	keep = "",
 ): Promise<InternalResource> {
@@ -281,8 +281,16 @@ async function leaf(target: Target, url: InternalUrl, context: ResolveContext | 
 			const types = typeFilter(url, target);
 			const spec = windowSpec(url);
 			const located = await locate(route.at, cwd);
-			const loaded = await loadSession(located.file, located.ref.sid, route.at.agent, signal);
-			const filter: EventFilter = { types, window: spec === null ? null : resolveWindow(spec, loaded.events, Date.now()) };
+			const { loaded, filter } = await loadFiltered(
+				located.file,
+				located.ref.sid,
+				route.at.agent,
+				types,
+				spec,
+				Date.now(),
+				"timeline",
+				signal,
+			);
 			// OMP keeps generated titles in its session index; the journal's own title slot is often empty.
 			const title = route.at.agent === "" && !loaded.meta.title ? ((await readSessionInfo(located.file))?.title ?? null) : null;
 			return text(url.href, renderTimeline(loaded, located.base, located.root, title, filter));
@@ -291,8 +299,16 @@ async function leaf(target: Target, url: InternalUrl, context: ResolveContext | 
 			const types = typeFilter(url, target);
 			const spec = windowSpec(url);
 			const located = await locate(route.at, cwd);
-			const loaded = await loadSession(located.file, located.ref.sid, route.at.agent, signal);
-			const filter: EventFilter = { types, window: spec === null ? null : resolveWindow(spec, loaded.events, Date.now()) };
+			const { loaded, filter } = await loadFiltered(
+				located.file,
+				located.ref.sid,
+				route.at.agent,
+				types,
+				spec,
+				Date.now(),
+				"records",
+				signal,
+			);
 			// jq's next page keeps the same input: the types as written, the window as absolute bounds.
 			const keep = [
 				types === null ? "" : `type=${types.source.replaceAll("%", "%25").replaceAll("&", "%26")}`,

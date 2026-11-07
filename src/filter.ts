@@ -6,9 +6,10 @@
 //   type=marker:compaction    markers of one kind (`-`, `_` and spaces are interchangeable)
 //   type=-call  type=!marker  exclusion; with no inclusion everything else is kept
 // Matching is case-insensitive. Unknown tokens throw, listing the accepted forms.
-// EventFilter ANDs this filter with the `since`/`until` window of window.ts.
-import type { SessionEvent } from "./events.ts";
-import { type TimeWindow, within } from "./window.ts";
+// EventFilter ANDs this filter with the `since`/`until` window of window.ts;
+// loadFiltered applies both before events are built in full.
+import { buildEvents, indexSession, type LoadedSession, type SessionEvent } from "./events.ts";
+import { resolveWindow, type TimeWindow, type WindowSpec, within } from "./window.ts";
 
 const KINDS = ["user", "developer", "thinking", "say", "call", "irc_out", "irc_in", "dispatch", "subresult", "exec", "marker"] as const;
 type Kind = (typeof KINDS)[number];
@@ -127,4 +128,67 @@ export interface EventFilter {
 /** Whether `event` passes both the type filter and the time window. */
 export function shows(filter: EventFilter, event: SessionEvent): boolean {
 	return (filter.types === null || keeps(filter.types, event)) && (filter.window === null || within(filter.window, event));
+}
+
+/**
+ * What a filtered read prints: `timeline` needs every event's structure (turn
+ * spans and counts, the filter line's totals) and the first prompt's text;
+ * `records` needs only the events the filter shows.
+ */
+export type FilteredRead = "timeline" | "records";
+
+/**
+ * Loads a session for a read filtered by `types` and the written window
+ * `spec` (resolved against the session and `now`). When the read or the filter
+ * needs it — `timeline` (turn spans, counts, the filter line), any `types`, or
+ * a clock bound for `sessionDay` — a LIGHT outline of every branch entry is
+ * built first, then `full` for the entries that print (and, for `timeline`,
+ * the first prompt that labels an untitled session). The loaded events render
+ * exactly as the fully built session filtered afterwards would. Without a
+ * filter this is loadSession.
+ */
+export async function loadFiltered(
+	file: string,
+	sid: string,
+	agent: string,
+	types: TypeFilter | null,
+	spec: WindowSpec | null,
+	now: number,
+	read: FilteredRead,
+	signal?: AbortSignal,
+): Promise<{ readonly loaded: LoadedSession; readonly filter: EventFilter }> {
+	const index = await indexSession(file, sid, agent, signal);
+	if (types === null && spec === null)
+		return { loaded: { meta: index.meta, events: await buildEvents(index, () => "full", signal) }, filter: { types, window: null } };
+	// A bare clock time takes its date from the session's events.
+	const clock = spec?.since?.kind === "clock" || spec?.until?.kind === "clock";
+	const outline = read === "timeline" || types !== null || clock ? await buildEvents(index, () => "light", signal) : null;
+	const filter: EventFilter = { types, window: spec === null ? null : resolveWindow(spec, outline ?? [], now) };
+	const printed = new Set<number>();
+	if (outline === null) {
+		for (const entry of index.branch) if (filter.window === null || within(filter.window, entry)) printed.add(entry.line);
+	} else {
+		for (const event of outline) if (shows(filter, event)) printed.add(event.line);
+		const prompt = read === "timeline" ? outline.find((event) => event.kind === "user") : undefined;
+		if (prompt !== undefined) printed.add(prompt.line);
+	}
+	const full = await buildEvents(index, (entry) => (printed.has(entry.line) ? "full" : "skip"), signal);
+	if (outline === null || read === "records") return { loaded: { meta: index.meta, events: full }, filter };
+	// An entry's events come out of LIGHT and FULL builds alike, so FULL ones replace LIGHT ones entry by entry.
+	const byLine = new Map<number, SessionEvent[]>();
+	for (const event of full) {
+		const built = byLine.get(event.line);
+		if (built === undefined) byLine.set(event.line, [event]);
+		else built.push(event);
+	}
+	const events: SessionEvent[] = [];
+	for (const event of outline) {
+		const built = byLine.get(event.line);
+		if (built === undefined) events.push(event);
+		else if (built.length > 0) {
+			events.push(...built);
+			built.length = 0;
+		}
+	}
+	return { loaded: { meta: index.meta, events }, filter };
 }

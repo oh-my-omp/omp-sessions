@@ -153,5 +153,5 @@ export async function transcriptEvents(
 	signal: AbortSignal | undefined,
 ): Promise<{ readonly loaded: LoadedSession; readonly records: EventRecord[] }> {
 	const loaded = await loadSession(transcript.file, transcript.sid, transcript.agent, signal);
-	return { loaded, records: eventRecords(loaded, transcriptUrl(transcript.sid, transcript.agent), filter) };
+	return { loaded, records: [...eventRecords(loaded, transcriptUrl(transcript.sid, transcript.agent), filter)] };
 }
