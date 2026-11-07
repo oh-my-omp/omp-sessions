@@ -111,6 +111,7 @@ const SIMPLE_ESCAPES: Readonly<Record<number, string>> = {
 	114: "\r",
 	116: "\t",
 };
+const DECODE_FLUSH_BYTES = 64 * 1024;
 const MAX_LITERAL = 512;
 const KEY_POLICY: Policy = scalar(Number.POSITIVE_INFINITY);
 /** Measures a skipped object's keys: same raw-byte and escape validation as capture, no value built. */
@@ -180,6 +181,8 @@ class JsonlScanner {
 	#stringParts: string[] = [];
 	#stringStored = 0;
 	#stringDecoder: TextDecoder | null = null;
+	#stringPending: Uint8Array[] = [];
+	#stringPendingBytes = 0;
 	#escape = 0; // 0 none, 1 after backslash, 2 collecting \u hex digits
 	#hex = "";
 	readonly #literalBuf = new Uint8Array(MAX_LITERAL);
@@ -246,6 +249,8 @@ class JsonlScanner {
 		this.#escape = 0;
 		this.#literalLen = 0;
 		this.#stringParts = [];
+		this.#stringPending = [];
+		this.#stringPendingBytes = 0;
 		this.#stringDecoder = null;
 	}
 
@@ -428,6 +433,8 @@ class JsonlScanner {
 		this.#stringStored = 0;
 		// ignoreBOM keeps a leading U+FEFF: it is string content here, not a stream marker.
 		this.#stringDecoder = this.#stringCapture ? new TextDecoder("utf-8", { ignoreBOM: true }) : null;
+		this.#stringPending = [];
+		this.#stringPendingBytes = 0;
 		this.#escape = 0;
 		this.#hex = "";
 	}
@@ -497,9 +504,20 @@ class JsonlScanner {
 		}
 		this.#stringChars += length;
 		if (!this.#stringCapture || this.#stringStored >= this.#stringCap) return true;
-		// Decode the segment in place: no copy, and nothing outlives the chunk.
-		this.#store(this.#stringDecoder?.decode(chunk.subarray(from, to), { stream: true }) ?? "");
+		const slice = chunk.subarray(from, to);
+		this.#stringPending.push(slice);
+		this.#stringPendingBytes += slice.length;
+		if (this.#stringPendingBytes >= DECODE_FLUSH_BYTES) this.#flushPending(true);
 		return true;
+	}
+
+	#flushPending(stream: boolean): void {
+		const decoder = this.#stringDecoder;
+		if (!decoder) return;
+		for (const part of this.#stringPending) this.#store(decoder.decode(part, { stream: true }));
+		this.#stringPending = [];
+		this.#stringPendingBytes = 0;
+		if (!stream) this.#store(decoder.decode());
 	}
 
 	#store(text: string): void {
@@ -513,6 +531,7 @@ class JsonlScanner {
 		this.#stringChars += 1;
 		if (text === "\n") this.#stringNewlines++;
 		if (!this.#stringCapture || this.#stringStored >= this.#stringCap) return;
+		this.#flushPending(true);
 		this.#store(text);
 	}
 
@@ -543,7 +562,7 @@ class JsonlScanner {
 	}
 
 	#endString(): void {
-		this.#store(this.#stringDecoder?.decode() ?? "");
+		this.#flushPending(false);
 		const text = this.#stringParts.join("");
 		this.#stringParts = [];
 		this.#stringDecoder = null;
