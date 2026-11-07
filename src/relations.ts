@@ -32,6 +32,11 @@ export interface SessionRow {
 	readonly parent: string | null;
 }
 
+/** A session's listed title: OMP's, else its first prompt's first line, as OMP's own listing names untitled sessions. */
+function titleOf(info: SessionInfo): string {
+	return info.title ?? (info.firstMessage.split("\n", 1)[0] ?? "").slice(0, 200);
+}
+
 export function metadata(infos: readonly SessionInfo[]): SessionRow[] {
 	const recaps = latestRecaps(infos.map((info) => info.id));
 	return infos.map((info) => ({
@@ -40,7 +45,7 @@ export function metadata(infos: readonly SessionInfo[]): SessionRow[] {
 		timeline: `session://${info.id}/timeline`,
 		project: path.basename(path.dirname(info.path)),
 		cwd: info.cwd,
-		title: info.title ?? (info.firstMessage.split("\n", 1)[0] ?? "").slice(0, 200),
+		title: titleOf(info),
 		created: Number.isNaN(info.created.getTime()) ? null : info.created.toISOString(),
 		modified: info.modified.toISOString(),
 		status: info.status ?? null,
@@ -61,13 +66,23 @@ export function projectDir(project: string | null, cwd: string | undefined): str
 	return project.includes("/") ? sessionDirForCwd(path.resolve(cwd ?? "/", project)) : path.join(getSessionsDir(), project);
 }
 
-/** Rows whose typed prompts (prompt-history FTS), title or recap match every word of `needle`. */
-export function matchText(rows: readonly SessionRow[], needle: string): SessionRow[] {
+/**
+ * Sessions whose typed prompts (prompt-history FTS), title or recap match every
+ * word of `needle`; recaps are looked up only for sessions neither of the
+ * others already matches.
+ */
+function matchText(infos: readonly SessionInfo[], needle: string): SessionInfo[] {
 	const fromPrompts = new Set(promptMatches(needle, 500));
 	const words = needle.toLowerCase().split(/\s+/);
-	return rows.filter((row) => {
-		if (fromPrompts.has(row.sid)) return true;
-		const haystack = `${row.title}\n${row.recap ?? ""}`.toLowerCase();
+	const titled = (info: SessionInfo): boolean => {
+		const title = titleOf(info).toLowerCase();
+		return words.every((word) => title.includes(word));
+	};
+	const open = infos.filter((info) => !fromPrompts.has(info.id) && !titled(info));
+	const recaps = latestRecaps(open.map((info) => info.id));
+	return infos.filter((info) => {
+		if (fromPrompts.has(info.id) || titled(info)) return true;
+		const haystack = `${titleOf(info)}\n${recaps.get(info.id) ?? ""}`.toLowerCase();
 		return words.every((word) => haystack.includes(word));
 	});
 }
@@ -81,13 +96,18 @@ export interface SessionQuery {
 	readonly limit: number;
 }
 
-/** Session rows, newest first: every filter applies before `limit` cuts the result. */
+/**
+ * Session rows, newest first: every filter applies before `limit` cuts the
+ * result, and only the rows kept get their metadata built.
+ */
 export async function sessionRows(query: SessionQuery, cwd: string | undefined): Promise<SessionRow[]> {
-	const rows = metadata(await listSessions(projectDir(query.project, cwd), ALL_SESSIONS)).filter((row) => {
-		const modified = Date.parse(row.modified);
+	// Unfiltered, the listing itself stops at `limit`: it returns the newest non-empty sessions in order.
+	const unfiltered = query.since === null && query.until === null && query.text === null;
+	const infos = (await listSessions(projectDir(query.project, cwd), unfiltered ? query.limit : ALL_SESSIONS)).filter((info) => {
+		const modified = info.modified.getTime();
 		return (query.since === null || modified >= query.since) && (query.until === null || modified < query.until);
 	});
-	return (query.text === null ? rows : matchText(rows, query.text)).slice(0, query.limit);
+	return metadata((query.text === null ? infos : matchText(infos, query.text)).slice(0, query.limit));
 }
 
 /** One transcript of a session: the root (`agent` "") or a subagent. */
