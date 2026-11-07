@@ -239,4 +239,86 @@ describe("session-urls scanner", () => {
 		await expectSame(text, () => keepAll(5, 3));
 		await expectSame(text, () => everything);
 	});
+
+	test("skipped subtrees still invalidate the line without building values", async () => {
+		const narrow: Policy = keys({ type: scalar(64), id: scalar(64) });
+		const nested: Policy = keys({ type: scalar(64), message: keys({ role: scalar(64) }) });
+		const lines = [
+			'{"type":"ok","id":"1","junk":[1,2,3]}',
+			'{"type":"ok","id":"2","junk":42}',
+			'{"type":"ok","id":"3","junk":[[1],{"a":[true,null]}]}',
+			'{"type":"x","id":"4","junk":[1,}',
+			'{"type":"x","id":"5","junk":{"a":1}]}',
+			'{"type":"x","id":"6","junk":tru}',
+			'{"type":"x","id":"7","junk":-}',
+			'{"type":"x","id":"8","junk":{"a\\qb":1}}',
+			'{"type":"x","id":"9","junk":{"ab":1}}',
+			'{"type":"ok","id":"10","junk":"fine \\"e\\" \\u00e9 ✓"}',
+			'{"type":"x","id":"11","junk":12',
+		];
+		const text = `${lines.slice(0, 10).join("\n")}\n${lines[10] ?? ""}`;
+		for (const root of [() => narrow, () => nested, () => SKIP, () => everything]) {
+			for (const size of CHUNKS) {
+				const outcome = await scan(text, root, size);
+				expect({ size, invalid: outcome.invalid, incomplete: outcome.incomplete }).toEqual({
+					size,
+					invalid: [4, 5, 6, 7, 8, 9],
+					incomplete: 11,
+				});
+			}
+			await expectSame(`${text}\n`, root);
+		}
+	});
+
+	test("literal grammar matches JSON.parse exactly, including the 512-byte cap", async () => {
+		const kept: Policy = keys({ v: scalar(0) });
+		const goods = [
+			"0",
+			"-0",
+			"1",
+			"-1",
+			"10",
+			"1.5",
+			"-2e-7",
+			"1E5",
+			"2.5e-3",
+			"1e+5",
+			"-0.0",
+			"9007199254740993",
+			"true",
+			"false",
+			"null",
+		];
+		const bads = [
+			"01",
+			"-01",
+			"1.",
+			".5",
+			"+1",
+			"1e",
+			"1e+",
+			"0x10",
+			"Infinity",
+			"NaN",
+			"1_0",
+			"tru",
+			"truex",
+			"nul",
+			"--1",
+			"1..2",
+			"12a",
+			// "-" must come right after "12a": a stale byte left in the
+			// literal buffer must not make it parse (regression: reads past
+			// `end` would see the '2' from "12a").
+			"-",
+		];
+		const text = [...goods, ...bads].map((literal) => `{"v":${literal}}`).join("\n");
+		await expectSame(`${text}\n`, () => kept);
+		const cap512 = `{"v":${"9".repeat(512)}}\n`;
+		await expectSame(cap512, () => kept);
+		for (const size of CHUNKS) {
+			const over = await scan(`{"v":${"9".repeat(513)}}\n`, () => kept, size);
+			expect({ size, invalid: over.invalid, records: over.records }).toEqual({ size, invalid: [1], records: [] });
+		}
+	});
 });
