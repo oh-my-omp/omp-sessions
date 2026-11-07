@@ -4,13 +4,13 @@
 
 ## Schema `src`: this call's relations
 
-Built when the call starts from `from` and `tables`, dropped when it ends. A view over `src` stops working after the call; keep results with `CREATE TABLE … AS`.
+Built when the call starts from `from` and `tables`, dropped when it ends. Only the relations the query reaches exist: those it names as `src.<name>`, and — when it goes through the catalog (`duckdb_tables()`, `information_schema`, `pg_class`, `sqlite_master`, `SHOW`, `DESCRIBE`, `SUMMARIZE`) or a dynamic table function (`query()`, `query_table()`) — all of them. A view over `src` stops working after the call; keep results with `CREATE TABLE … AS`.
 
 - `src.files`(sid, agent, parent, file, bytes, modified): each transcript file read: the root (agent `""`) and, with `agents`, every subagent with the allocated id it ran under as `parent`.
 - `src.entries`(file, json, type, id, parent_id, t): every line of those files, read in place from disk when the query runs. `json` is the whole record (`json->>'$.message.role'`, `json_extract`, `unnest(json->'$.message.content')`); join to `src.files` on `file`. All branches, not only the active one. A line still being written fails the query.
 - `src.sessions`(sid PK, project, cwd, title, created, modified, status, assistant_turns, size, recap, parent, url): the `sessions` action's row of each named session. `parent` is the header's parentSession as written: a file path (forks, task children) or a session id (continuations), not a key.
 - `src.transcripts`(sid, agent, parent, title, created, parent_session, entries, on_branch, events, url): each transcript with its active-branch size.
-- `src.events`(sid, agent, seq, turn, t, kind, entry, block, line, call_id, tool, status, result_entry, text, data, url): the active branch in order, as `events.jsonl` serves it; `data` is the full record as JSON. A call joins to its result through `result_entry` within the same (sid, agent). Text over the session:// limits ends in `…[clipped: N chars total]`; `url` reads the entry in full.
+- `src.events`(sid, agent, seq, turn, t, kind, entry, block, line, call_id, tool, status, result_entry, text, data, url): the active branch in order, as `events.jsonl` serves it; `data` is the record as JSON without the field that went into `text` (its `text`, or its `source` when it has no `text`). A call joins to its result through `result_entry` within the same (sid, agent). Text over the session:// limits ends in `…[clipped: N chars total]`; `url` reads the entry in full.
 - `src.<name>`: the rows passed in `tables`.
 
 ## Schema `main`: results that last
