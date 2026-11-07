@@ -17,6 +17,14 @@ Built when the call starts from `from` and `tables`, dropped when it ends. A vie
 
 Tables, views and macros created without a schema (`CREATE TABLE hot AS SELECT …`) stay for the rest of this omp session and every later `sql` call sees them. `/new`, resume, fork or ending the session discard them; nothing is written to disk.
 
+## Result size
+
+A `sql` call returns rows as JSON objects, at most `limit` of them (default 1000) and within a character budget of 16 MiB. The budget counts each row's values without serializing the row: a string by its length, a number, boolean or null by its JSON text, and a list or struct by its values recursively. A row that would not fit the remaining budget is not returned, and `truncated` becomes `true`; every row that is returned is exactly the row the same query returns when it fits. `truncated` also reports a row that exists past `limit`.
+
+## Export
+
+`export` reads the whole query result and writes it with DuckDB COPY: `parquet`, `csv` (one header line) or `json` (one object per line). It writes the file from a separate engine that runs no caller SQL, so the export engine touches only the file you name. When the call is aborted while the caller's result is still being read, the call fails and no file is created; once that read has finished, COPY runs on the export engine outside the caller's signal, so it finishes and the call returns its row count even if the signal has aborted. An abort never leaves a partial file.
+
 ## What SQL may do
 
 - Admitted: SELECT, INSERT, UPDATE, DELETE, MERGE, CREATE, ALTER, DROP, EXPLAIN. Several statements may run in one call (`CREATE TABLE t AS …; SELECT …`); the last one's result comes back. `params` bind a single statement only.
