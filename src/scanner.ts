@@ -6,7 +6,8 @@
 // of hundreds of MB costs one pass over its bytes and no allocation for it.
 // Validation is JSON.parse-equivalent for every built or measured value; inside
 // skipped strings only the record-ending newline is checked (other raw control
-// bytes there are tolerated). Host-free (Bun/Web APIs only).
+// bytes there are tolerated). Host-free (Bun and node:fs only).
+import { open } from "node:fs/promises";
 
 /** A string longer than its cap: the captured prefix plus the full measure. */
 export class Clipped {
@@ -164,7 +165,7 @@ class JsonlScanner {
 	readonly #root: (line: number) => Policy;
 	readonly #emit: (record: ScannedRecord) => void;
 	#mode: Mode = "value";
-	#stack: Frame[] = [];
+	readonly #stack: Frame[] = [];
 	#line = 1;
 	#recordStarted = false;
 	#records = 0;
@@ -178,10 +179,13 @@ class JsonlScanner {
 	#stringMeasure = false;
 	#stringChars = 0;
 	#stringNewlines = 0;
-	#stringParts: string[] = [];
+	readonly #stringParts: string[] = [];
 	#stringStored = 0;
+	// ignoreBOM keeps a leading U+FEFF: it is string content here, not a stream marker.
+	readonly #decoder = new TextDecoder("utf-8", { ignoreBOM: true });
+	/** `#decoder` while a captured string is open. */
 	#stringDecoder: TextDecoder | null = null;
-	#stringPending: Uint8Array[] = [];
+	readonly #stringPending: Uint8Array[] = [];
 	#stringPendingBytes = 0;
 	#escape = 0; // 0 none, 1 after backslash, 2 collecting \u hex digits
 	#hex = "";
@@ -224,6 +228,8 @@ class JsonlScanner {
 				if (byte !== NEWLINE) index++;
 			}
 		}
+		// Pending string bytes are views of `chunk`; decode them before the caller reuses its buffer.
+		if (this.#stringPending.length > 0) this.#flushPending(true);
 	}
 
 	end(): ScanStats {
@@ -242,14 +248,14 @@ class JsonlScanner {
 
 	#reset(): void {
 		this.#mode = "value";
-		this.#stack = [];
+		this.#stack.length = 0;
 		this.#recordStarted = false;
 		this.#topValue = undefined;
 		this.#topSet = false;
 		this.#escape = 0;
 		this.#literalLen = 0;
-		this.#stringParts = [];
-		this.#stringPending = [];
+		this.#stringParts.length = 0;
+		this.#stringPending.length = 0;
 		this.#stringPendingBytes = 0;
 		this.#stringDecoder = null;
 	}
@@ -429,11 +435,14 @@ class JsonlScanner {
 		this.#stringCapture = this.#stringMeasure && this.#stringCap > 0;
 		this.#stringChars = 0;
 		this.#stringNewlines = 0;
-		this.#stringParts = [];
+		this.#stringParts.length = 0;
 		this.#stringStored = 0;
-		// ignoreBOM keeps a leading U+FEFF: it is string content here, not a stream marker.
-		this.#stringDecoder = this.#stringCapture ? new TextDecoder("utf-8", { ignoreBOM: true }) : null;
-		this.#stringPending = [];
+		if (this.#stringCapture) {
+			// A string a malformed line cut short may have left partial bytes in the decoder; drop them.
+			this.#decoder.decode();
+			this.#stringDecoder = this.#decoder;
+		} else this.#stringDecoder = null;
+		this.#stringPending.length = 0;
 		this.#stringPendingBytes = 0;
 		this.#escape = 0;
 		this.#hex = "";
@@ -515,7 +524,7 @@ class JsonlScanner {
 		const decoder = this.#stringDecoder;
 		if (!decoder) return;
 		for (const part of this.#stringPending) this.#store(decoder.decode(part, { stream: true }));
-		this.#stringPending = [];
+		this.#stringPending.length = 0;
 		this.#stringPendingBytes = 0;
 		if (!stream) this.#store(decoder.decode());
 	}
@@ -564,7 +573,7 @@ class JsonlScanner {
 	#endString(): void {
 		this.#flushPending(false);
 		const text = this.#stringParts.join("");
-		this.#stringParts = [];
+		this.#stringParts.length = 0;
 		this.#stringDecoder = null;
 		if (this.#stringIsKey) {
 			const frame = this.#stack.at(-1);
@@ -584,10 +593,33 @@ class JsonlScanner {
 	}
 }
 
+/** Bytes `fileChunks` reads at a time. */
+const READ_BYTES = 256 * 1024;
+
 /**
- * Scans a JSONL byte stream (`Bun.file(path).stream()`, or any chunk sequence)
- * with `policy`, calling `onRecord` per parsed line. Chunk boundaries may fall
- * anywhere, including inside a UTF-8 character or an escape.
+ * A file's bytes as successive views of one reused buffer: each view is valid
+ * until the next is requested, so a whole-file scan allocates one buffer
+ * instead of one per chunk.
+ */
+export async function* fileChunks(file: string): AsyncGenerator<Uint8Array> {
+	const handle = await open(file, "r");
+	try {
+		const buffer = new Uint8Array(READ_BYTES);
+		for (;;) {
+			const { bytesRead } = await handle.read(buffer, 0, READ_BYTES, null);
+			if (bytesRead === 0) return;
+			yield buffer.subarray(0, bytesRead);
+		}
+	} finally {
+		await handle.close();
+	}
+}
+
+/**
+ * Scans a JSONL byte stream (`fileChunks(path)`, or any chunk sequence) with
+ * `policy`, calling `onRecord` per parsed line. Chunk boundaries may fall
+ * anywhere, including inside a UTF-8 character or an escape; a chunk is no
+ * longer read once the next is requested, so its buffer may be reused.
  */
 export async function scanChunks(
 	chunks: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
