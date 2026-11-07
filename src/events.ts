@@ -257,10 +257,9 @@ export interface SessionIndex {
  * reads kept exact (kind, entry, block, t, line, turn, a call's id, tool and
  * completed-call facts, IRC ends, marker names, exec status, prompt
  * attribution), every free text measured only (length and line count, not
- * content), a call's arguments reduced to `path` and `i`, and the fields those
- * dropped arguments or summaries would fill — a dispatch's children and
- * context, an irc_out body, a summary marker's detail — empty; `skip` builds
- * none.
+ * content), and a call's arguments reduced to `path` and `i` — so a dispatch
+ * keeps one placeholder child (`?`/`task`/empty task) and loses its context,
+ * an irc_out its body, a summary marker its detail. `skip` builds none.
  */
 export type Build = "full" | "light" | "skip";
 

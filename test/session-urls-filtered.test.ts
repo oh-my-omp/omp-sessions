@@ -45,6 +45,14 @@ function session(days: readonly number[]): string {
 				},
 			});
 			add(day, hour, 2, { type: "message", message: { role: "toolResult", toolCallId: `c${n - 1}`, toolName: "bash", content: "out" } });
+			add(day, hour, 3, {
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName: "task",
+					content: `<task-result id="sub-${day}-${hour}" agent="Alpha" status="completed" duration="1s"><output>sub ${hour}</output></task-result>`,
+				},
+			});
 			add(day, hour, 20, { type: "compaction", summary: `summary ${hour}` });
 		}
 	const file = path.join(dir, `${days.join("-")}.jsonl`);
@@ -96,6 +104,15 @@ describe("session-urls filtered reads", () => {
 		const spec = parseWindow("2026-11-01T1000", "2026-11-01T1030");
 		const { loaded } = await loadFiltered(ONE_DAY, "sid", "", null, spec, NOW, "records");
 		expect(new Set(loaded.events.map((event) => new Date(event.t).getHours()))).toEqual(new Set([10]));
+	});
+
+	test("type=subresult keeps the session's subagent results", async () => {
+		const want = await expected(ONE_DAY, "subresult", null, null);
+		expect(want.records.length).toBeGreaterThan(0);
+		expect(want.records.every((record) => record.kind === "subresult")).toBe(true);
+		expect(want.timeline).toContain("sub-1-9");
+		const got = await loadFiltered(ONE_DAY, "sid", "", parseTypeFilter(["subresult"]), null, NOW, "records");
+		expect([...eventRecords(got.loaded, "session://sid", got.filter)]).toEqual(want.records);
 	});
 
 	test("a bare time on a two-day session fails as before", async () => {

@@ -139,10 +139,13 @@ export type FilteredRead = "timeline" | "records";
 
 /**
  * Loads a session for a read filtered by `types` and the written window
- * `spec` (resolved against the session and `now`), building in full only the
- * entries that print. Every other event is built LIGHT where the read or the
- * window needs it, and not at all otherwise; the loaded events then render
- * exactly as the fully built session would. Without a filter this is loadSession.
+ * `spec` (resolved against the session and `now`). When the read or the filter
+ * needs it — `timeline` (turn spans, counts, the filter line), any `types`, or
+ * a clock bound for `sessionDay` — a LIGHT outline of every branch entry is
+ * built first, then `full` for the entries that print (and, for `timeline`,
+ * the first prompt that labels an untitled session). The loaded events render
+ * exactly as the fully built session filtered afterwards would. Without a
+ * filter this is loadSession.
  */
 export async function loadFiltered(
 	file: string,
