@@ -34,7 +34,7 @@ omp install https://github.com/oh-my-omp/omp-sessions
 | `export` | 把一个查询结果写成调用方指定路径的 parquet、csv 或 json 文件 |
 
 - **在线计算**：每次 `sql` 调用按点名的会话、只对查询引用到的关系，从当时的会话文件建出 schema `src`，调用结束即删除；走目录（`duckdb_tables()`、`information_schema`、`SHOW` 等）或动态表函数（`query()`、`query_table()`）的查询会建出全部关系。`src.entries` 直接在磁盘上原地读取每一行 JSONL；`src.events`、`src.transcripts`、`src.sessions` 来自与 `session://` 相同的加载器，因此按当前分支、用结果补全工具调用、带 recap。不保留任何会话副本。
-- **中间结果**：在 schema `main` 里建的表、视图和宏保存在该会话的内存数据库里，后续调用可用；`/new`、resume、fork 或会话结束时清空。单元里的行经 `tables` 以 `src.<name>` 参与查询。
+- **中间结果**：在 schema `main` 里建的表、视图和宏保存在该会话的内存数据库里，后续调用可用；`/new`、resume、fork 或会话结束时清空。该数据库在内存中最多占用 4 GB，超出部分溢写到随数据库一起删除的临时目录。单元里的行经 `tables` 以 `src.<name>` 参与查询。
 - **SQL 的边界**：允许查询和修改数据库自身的对象；COPY、EXPORT、ATTACH、INSTALL、LOAD、SET、PRAGMA、CALL 等引擎或文件语句一律拒绝。SQL 只能读会话目录下的文件，不能写任何文件；`export` 才写文件，从不写进会话目录，并申请 write 审批。
 - 调用约定见工具专题 `xd://session_query/actions` 与 `xd://session_query/sql`（`src/query/topics/`）。
 

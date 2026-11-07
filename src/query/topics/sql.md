@@ -15,7 +15,9 @@ Built when the call starts from `from` and `tables`, dropped when it ends. Only 
 
 ## Schema `main`: results that last
 
-Tables, views and macros created without a schema (`CREATE TABLE hot AS SELECT …`) stay for the rest of this omp session and every later `sql` call sees them. `/new`, resume, fork or ending the session discard them; nothing is written to disk.
+Tables, views and macros created without a schema (`CREATE TABLE hot AS SELECT …`) stay for the rest of this omp session and every later `sql` call sees them. `/new`, resume, fork or ending the session discard them.
+
+The session's database holds at most 4 GB in memory. Past that, tables and the joins, sorts and aggregates of a query spill to a private temporary directory that is removed when the database closes; a query that needs a single allocation larger than what is left fails with DuckDB's `Out of Memory Error`.
 
 ## Result size
 

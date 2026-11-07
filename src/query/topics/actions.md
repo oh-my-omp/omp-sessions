@@ -1,6 +1,6 @@
 # session_query actions
 
-Call from an eval cell and read `.details`: `(await tool.session_query({ action: "sql", … })).details` in JavaScript, `(await tool.session_query({...}))["details"]` in Python. Every action reads the session files as they are when it runs.
+Call from an eval cell and read `.details`: `(await tool.session_query({ action: "sql", … })).details` in JavaScript, `(await tool.session_query({...}))["details"]` in Python. Every action reads the session files as they are when it runs. A direct call shows `details` as JSON text when it fits in 8192 characters, otherwise only `<action>: more than 8192 chars of JSON in details; call from eval and read .details`.
 
 | action | parameters | details |
 |---|---|---|
