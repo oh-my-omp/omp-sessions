@@ -48,6 +48,17 @@ function registerScheme(pi: ExtensionAPI): void {
 		return;
 	}
 	routes.register(new SessionUrlHandler());
+	// Canonical order (oh-my-omp/omp-config#224 §U1): builtins keep host order
+	// first; every other scheme sorts by name. Re-insert each non-builtin
+	// handler in sorted order so the system-prompt list depends on the set,
+	// not on binding timing.
+	const ordered = [...routes.specs().keys()].filter((scheme) => !routes.isBuiltin(scheme)).sort();
+	for (const scheme of ordered) {
+		const handler = routes.getHandler(scheme);
+		if (!handler) continue;
+		routes.unregister(scheme);
+		routes.register(handler);
+	}
 }
 
 export default function ompSessions(pi: ExtensionAPI): void {
