@@ -184,10 +184,52 @@ async function run(
 	}
 }
 
+/** The most JSON text a direct call shows. */
+const SUMMARY_CHARS = 8192;
+
+/**
+ * `JSON.stringify(value)` when it is at most `budget` chars, else null.
+ * Serialization stops once the text passes the budget, so a large result is
+ * never serialized whole; a string longer than what is left is not escaped.
+ * The value is JSON data — strings, numbers, booleans, null, arrays, plain
+ * objects, Dates — which is what `Details` holds; boxed primitives and a
+ * `toJSON` returning undefined would not match `JSON.stringify` here.
+ */
+export function jsonWithin(value: unknown, budget: number): string | null {
+	const parts: string[] = [];
+	let length = 0;
+	const push = (text: string): boolean => {
+		length += text.length;
+		parts.push(text);
+		return length <= budget;
+	};
+	const write = (item: unknown): boolean => {
+		if (typeof item === "string") return length + item.length + 2 <= budget && push(JSON.stringify(item));
+		if (item === null || typeof item !== "object" || ("toJSON" in item && typeof item.toJSON === "function"))
+			return push(JSON.stringify(item) ?? "null");
+		if (Array.isArray(item)) {
+			if (!push("[")) return false;
+			for (let at = 0; at < item.length; at++) if ((at > 0 && !push(",")) || !write(item[at])) return false;
+			return push("]");
+		}
+		if (!push("{")) return false;
+		let first = true;
+		for (const [key, field] of Object.entries(item)) {
+			if (field === undefined || typeof field === "function" || typeof field === "symbol") continue;
+			if (!push(`${first ? "" : ","}${JSON.stringify(key)}:`) || !write(field)) return false;
+			first = false;
+		}
+		return push("}");
+	};
+	return write(value) ? parts.join("") : null;
+}
+
 /** The text a direct (non-eval) call shows; eval cells read `details`. */
 function summary(request: Request, details: Details): string {
-	const shown = JSON.stringify(details);
-	return shown.length <= 8192 ? shown : `${request.action}: ${shown.length} chars of JSON in details; call from eval and read .details`;
+	return (
+		jsonWithin(details, SUMMARY_CHARS) ??
+		`${request.action}: more than ${SUMMARY_CHARS} chars of JSON in details; call from eval and read .details`
+	);
 }
 
 /** Writing a file needs write approval; every other action only reads session files. */

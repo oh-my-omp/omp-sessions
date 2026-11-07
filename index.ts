@@ -81,6 +81,6 @@ export default function ompSessions(pi: ExtensionAPI): void {
 			pi.logger.warn("omp-sessions: session_query activation failed", { error: errorText(error) });
 		}
 	});
-	pi.on("session_switch", () => databases.close());
-	pi.on("session_shutdown", () => databases.close());
+	pi.on("session_switch", () => void databases.close());
+	pi.on("session_shutdown", () => void databases.close());
 }
