@@ -103,7 +103,18 @@ async function jsonlResource(
 	if (!selector) return text(url.href, jsonl(records));
 	const scratch = path.join(os.tmpdir(), `omp-sessions-${crypto.randomUUID()}.jsonl`);
 	try {
-		await Bun.write(scratch, jsonl(records));
+		await Bun.write(scratch, ""); // FileSink opens lazily; zero records still need a file for jaq.
+		const writer = Bun.file(scratch).writer();
+		try {
+			let first = true;
+			for (const record of records) {
+				if (first) first = false;
+				else writer.write("\n");
+				writer.write(JSON.stringify(record));
+			}
+		} finally {
+			await writer.end();
+		}
 		const output = await executeJsonQuery(scratch, selector, signal);
 		return text(url.href, keep === "" ? output : output.replaceAll("; append ?", `; append ?${keep}&`));
 	} finally {
