@@ -253,10 +253,14 @@ export interface SessionIndex {
 
 /**
  * How the build pass projects one branch entry: `full` builds its events as
- * loadSession returns them; `light` builds them with every free text,
- * argument and context measured only (kind, entry, block, t, line, turn, call
- * id/tool/status/intent/result/duration, IRC ends, marker names, exec status
- * and prompt attribution stay exact); `skip` builds none.
+ * loadSession returns them; `light` builds the same events with what a filter
+ * reads kept exact (kind, entry, block, t, line, turn, a call's id, tool and
+ * completed-call facts, IRC ends, marker names, exec status, prompt
+ * attribution), every free text measured only (length and line count, not
+ * content), a call's arguments reduced to `path` and `i`, and the fields those
+ * dropped arguments or summaries would fill — a dispatch's children and
+ * context, an irc_out body, a summary marker's detail — empty; `skip` builds
+ * none.
  */
 export type Build = "full" | "light" | "skip";
 
