@@ -253,7 +253,11 @@ export function renderTimeline(loaded: LoadedSession, base: string, root: string
 	lines.push("");
 
 	const turns = new Map<number, SessionEvent[]>();
-	for (const event of events) turns.set(event.turn, [...(turns.get(event.turn) ?? []), event]);
+	for (const event of events) {
+		const turn = turns.get(event.turn);
+		if (turn === undefined) turns.set(event.turn, [event]);
+		else turn.push(event);
+	}
 	let previousAt: number | null = null;
 	let shownDate: string | null = null;
 	let gap = 0;
