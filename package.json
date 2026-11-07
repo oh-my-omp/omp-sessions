@@ -1,6 +1,6 @@
 {
 	"name": "omp-sessions",
-	"version": "0.1.7",
+	"version": "0.1.8",
 	"description": "Reads the omp sessions on this machine: the session:// URL scheme for read and grep, and session_query for SQL over the session files from eval",
 	"type": "module",
 	"repository": {
