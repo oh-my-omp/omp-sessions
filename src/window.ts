@@ -9,7 +9,10 @@
 // half-open [start, end). OMP's read peels a trailing `:<digits>` off an
 // internal URL as a line selector, so `until=14:30` at the end of a URL
 // arrives as `until=14`; that truncated shape fails with the colonless forms.
-import type { SessionEvent } from "./events.ts";
+/** Anything stamped with an entry's timestamp: an event, or a branch entry before its events are built. */
+export interface Timed {
+	readonly t: string;
+}
 
 interface Day {
 	readonly year: number;
@@ -129,7 +132,7 @@ function dayName(value: Day): string {
 }
 
 /** The single local date of the session's timestamped events, for clock-only bounds. */
-function sessionDay(events: readonly SessionEvent[]): Day {
+function sessionDay(events: readonly Timed[]): Day {
 	const days = new Map<string, Day>();
 	for (const event of events) {
 		const at = new Date(event.t);
@@ -148,7 +151,7 @@ function sessionDay(events: readonly SessionEvent[]): Day {
 }
 
 /** The half-open span [start, end) of a bound's written unit. */
-function span(bound: Bound, events: readonly SessionEvent[], now: number): { readonly start: number; readonly end: number } {
+function span(bound: Bound, events: readonly Timed[], now: number): { readonly start: number; readonly end: number } {
 	switch (bound.kind) {
 		case "ago":
 			return { start: now - bound.ms, end: now - bound.ms + 1 };
@@ -175,7 +178,7 @@ function span(bound: Bound, events: readonly SessionEvent[], now: number): { rea
 }
 
 /** Resolves written bounds against the session (clock-only bounds) and `now` (relative bounds). */
-export function resolveWindow(spec: WindowSpec, events: readonly SessionEvent[], now: number): TimeWindow {
+export function resolveWindow(spec: WindowSpec, events: readonly Timed[], now: number): TimeWindow {
 	const start = spec.since === null ? null : span(spec.since, events, now).start;
 	const end = spec.until === null ? null : span(spec.until, events, now).end;
 	if (start !== null && end !== null && start >= end)
@@ -184,7 +187,7 @@ export function resolveWindow(spec: WindowSpec, events: readonly SessionEvent[],
 }
 
 /** Whether `event` falls in the window; an event without a valid timestamp never does. */
-export function within(window: TimeWindow, event: SessionEvent): boolean {
+export function within(window: TimeWindow, event: Timed): boolean {
 	const at = Date.parse(event.t);
 	if (Number.isNaN(at)) return false;
 	return (window.start === null || at >= window.start) && (window.end === null || at < window.end);
