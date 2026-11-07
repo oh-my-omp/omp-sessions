@@ -168,7 +168,7 @@ async function run(
 		case "export":
 			return databases.run(ctx.sessionManager.getSessionId(), signal, async (connection) => {
 				try {
-					await buildSources(connection, selection(request.from), request.tables ?? {}, ctx.cwd, signal);
+					await buildSources(connection, selection(request.from), request.tables ?? {}, request.query, ctx.cwd, signal);
 					const bindings: Bindings | null = request.params ?? null;
 					return request.action === "sql"
 						? { ...(await runSql(connection, request.query, bindings, request.limit ?? 1000)) }
