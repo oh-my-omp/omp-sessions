@@ -90,12 +90,22 @@ function oracle(text: string, root: (line: number) => Policy): Outcome {
 	return { records, invalid, incomplete };
 }
 
+/** `bytes` in `size`-byte chunks of one reused buffer, refilled with junk first, as fileChunks reuses its buffer. */
+function* reusedChunks(bytes: Uint8Array, size: number): Generator<Uint8Array> {
+	const buffer = new Uint8Array(size);
+	for (let offset = 0; offset < bytes.length; offset += size) {
+		const chunk = bytes.subarray(offset, offset + size);
+		buffer.fill(0x7e);
+		buffer.set(chunk);
+		yield buffer.subarray(0, chunk.length);
+	}
+}
+
 async function scan(text: string, root: (line: number) => Policy, chunkSize: number): Promise<Outcome> {
-	const bytes = new TextEncoder().encode(text);
-	const chunks: Uint8Array[] = [];
-	for (let offset = 0; offset < bytes.length; offset += chunkSize) chunks.push(bytes.subarray(offset, offset + chunkSize));
 	const records: Outcome["records"] = [];
-	const stats = await scanChunks(chunks, root, (record) => records.push({ line: record.line, value: plain(record.value) }));
+	const stats = await scanChunks(reusedChunks(new TextEncoder().encode(text), chunkSize), root, (record) =>
+		records.push({ line: record.line, value: plain(record.value) }),
+	);
 	return { records, invalid: [...stats.invalidLines], incomplete: stats.incompleteTail };
 }
 
