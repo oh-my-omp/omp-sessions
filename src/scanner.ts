@@ -100,7 +100,7 @@ const QUOTE = 0x22;
 const BACKSLASH = 0x5c;
 const NEWLINE = 0x0a;
 const HEX = /^[0-9a-fA-F]{4}$/;
-const NUMBER = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
 const SIMPLE_ESCAPES: Readonly<Record<number, string>> = {
 	[QUOTE]: '"',
 	[BACKSLASH]: "\\",
@@ -111,9 +111,47 @@ const SIMPLE_ESCAPES: Readonly<Record<number, string>> = {
 	114: "\r",
 	116: "\t",
 };
-const DECODE_FLUSH_BYTES = 64 * 1024;
 const MAX_LITERAL = 512;
 const KEY_POLICY: Policy = scalar(Number.POSITIVE_INFINITY);
+/** Measures a skipped object's keys: same raw-byte and escape validation as capture, no value built. */
+const SKIP_KEY_POLICY: Policy = scalar(0);
+
+/** Shared stack entries for skipped containers: their mutable fields are never read. */
+const SKIP_ARRAY_FRAME: Frame = Object.freeze({ array: true, policy: SKIP, target: null, key: "", count: 0 });
+const SKIP_OBJECT_FRAME: Frame = Object.freeze({ array: false, policy: SKIP, target: null, key: "", count: 0 });
+
+/** `-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?` over literal bytes; literals are ASCII, digits match only ASCII. */
+function isNumberLiteral(buf: Uint8Array, end: number): boolean {
+	const digit = (index: number): boolean => index < end && buf[index] !== undefined && buf[index] >= 0x30 && buf[index] <= 0x39;
+	const digits = (index: number): number => {
+		while (digit(index)) index++;
+		return index;
+	};
+	let index = buf[0] === 0x2d ? 1 : 0;
+	if (index >= end) return false;
+	if (buf[index] === 0x30) index++;
+	else if (digit(index) && buf[index] !== 0x30) index = digits(index);
+	else return false;
+	if (index < end && buf[index] === 0x2e) {
+		const next = digits(index + 1);
+		if (next === index + 1) return false;
+		index = next;
+	}
+	if (index < end && (buf[index] === 0x65 || buf[index] === 0x45)) {
+		index++;
+		if (index < end && (buf[index] === 0x2b || buf[index] === 0x2d)) index++;
+		const next = digits(index);
+		if (next === index) return false;
+		index = next;
+	}
+	return index === end;
+}
+
+function literalIs(buf: Uint8Array, end: number, word: string): boolean {
+	if (end !== word.length) return false;
+	for (let index = 0; index < end; index++) if (buf[index] !== word.charCodeAt(index)) return false;
+	return true;
+}
 
 class ParseError extends Error {}
 
@@ -142,11 +180,10 @@ class JsonlScanner {
 	#stringParts: string[] = [];
 	#stringStored = 0;
 	#stringDecoder: TextDecoder | null = null;
-	#stringPending: Uint8Array[] = [];
-	#stringPendingBytes = 0;
 	#escape = 0; // 0 none, 1 after backslash, 2 collecting \u hex digits
 	#hex = "";
-	#literal = "";
+	readonly #literalBuf = new Uint8Array(MAX_LITERAL);
+	#literalLen = 0;
 	#literalPolicy: Policy = SKIP;
 	/** Per chunk: next index of `"`, `\` and newline at or after the last lookup (-1 none left, -2 unknown). */
 	readonly #next: [number, number, number] = [-2, -2, -2];
@@ -207,10 +244,8 @@ class JsonlScanner {
 		this.#topValue = undefined;
 		this.#topSet = false;
 		this.#escape = 0;
-		this.#literal = "";
+		this.#literalLen = 0;
 		this.#stringParts = [];
-		this.#stringPending = [];
-		this.#stringPendingBytes = 0;
 		this.#stringDecoder = null;
 	}
 
@@ -243,7 +278,12 @@ class JsonlScanner {
 			this.#mode = "afterTop";
 			return;
 		}
-		if (frame.target !== null && value !== undefined) {
+		if (frame.target === null) {
+			// Skipped container (shared frozen frame): no value to attach, no field to write.
+			this.#mode = frame.array ? "arrayCommaOrEnd" : "objectCommaOrEnd";
+			return;
+		}
+		if (value !== undefined) {
 			if (Array.isArray(frame.target)) frame.target.push(value);
 			else frame.target[frame.key] = value;
 		}
@@ -267,8 +307,8 @@ class JsonlScanner {
 					this.#byte(byte);
 					return;
 				}
-				if (this.#literal.length >= MAX_LITERAL) throw new ParseError("literal too long");
-				this.#literal += String.fromCharCode(byte);
+				if (this.#literalLen >= MAX_LITERAL) throw new ParseError("literal too long");
+				this.#literalBuf[this.#literalLen++] = byte;
 				return;
 			case "afterTop":
 				if (!whitespace) throw new ParseError("trailing data");
@@ -290,7 +330,7 @@ class JsonlScanner {
 					return;
 				}
 				if (byte !== QUOTE) throw new ParseError("expected key");
-				this.#startString(true, KEY_POLICY);
+				this.#startString(true, this.#stack.at(-1)?.policy.kind === "skip" ? SKIP_KEY_POLICY : KEY_POLICY);
 				return;
 			case "colon":
 				if (whitespace) return;
@@ -324,8 +364,13 @@ class JsonlScanner {
 		const policy = this.#currentPolicy();
 		if (byte === 0x7b || byte === 0x5b) {
 			const array = byte === 0x5b;
-			const target = policy.kind === "keep" ? (array ? [] : newObject()) : null;
-			this.#stack.push({ array, policy, target, key: "", count: 0 });
+			if (policy.kind === "keep") {
+				this.#stack.push({ array, policy, target: array ? [] : newObject(), key: "", count: 0 });
+			} else {
+				// Skipped container: the shared frame carries the bracket kind for
+				// mismatched-close checks; key and count on it are never read.
+				this.#stack.push(array ? SKIP_ARRAY_FRAME : SKIP_OBJECT_FRAME);
+			}
 			this.#mode = array ? "arrayValueOrEnd" : "objectKeyOrEnd";
 			return;
 		}
@@ -334,7 +379,8 @@ class JsonlScanner {
 			return;
 		}
 		if (byte === 0x2d || (byte >= 0x30 && byte <= 0x39) || byte === 0x74 || byte === 0x66 || byte === 0x6e) {
-			this.#literal = String.fromCharCode(byte);
+			this.#literalBuf[0] = byte;
+			this.#literalLen = 1;
 			this.#literalPolicy = policy;
 			this.#mode = "literal";
 			return;
@@ -343,15 +389,24 @@ class JsonlScanner {
 	}
 
 	#endLiteral(): void {
-		const text = this.#literal;
-		this.#literal = "";
-		let value: Projected;
-		if (text === "true") value = true;
-		else if (text === "false") value = false;
-		else if (text === "null") value = null;
-		else if (NUMBER.test(text)) value = Number(text);
-		else throw new ParseError("bad literal");
-		this.#attach(this.#literalPolicy.kind === "keep" ? value : undefined);
+		const buf = this.#literalBuf;
+		const end = this.#literalLen;
+		this.#literalLen = 0;
+		const keep = this.#literalPolicy.kind === "keep";
+		if (literalIs(buf, end, "true")) {
+			this.#attach(keep ? true : undefined);
+			return;
+		}
+		if (literalIs(buf, end, "false")) {
+			this.#attach(keep ? false : undefined);
+			return;
+		}
+		if (literalIs(buf, end, "null")) {
+			this.#attach(keep ? null : undefined);
+			return;
+		}
+		if (!isNumberLiteral(buf, end)) throw new ParseError("bad literal");
+		this.#attach(keep ? Number(String.fromCharCode(...buf.subarray(0, end))) : undefined);
 	}
 
 	#closeContainer(array: boolean): void {
@@ -373,8 +428,6 @@ class JsonlScanner {
 		this.#stringStored = 0;
 		// ignoreBOM keeps a leading U+FEFF: it is string content here, not a stream marker.
 		this.#stringDecoder = this.#stringCapture ? new TextDecoder("utf-8", { ignoreBOM: true }) : null;
-		this.#stringPending = [];
-		this.#stringPendingBytes = 0;
 		this.#escape = 0;
 		this.#hex = "";
 	}
@@ -444,20 +497,9 @@ class JsonlScanner {
 		}
 		this.#stringChars += length;
 		if (!this.#stringCapture || this.#stringStored >= this.#stringCap) return true;
-		const slice = chunk.slice(from, to);
-		this.#stringPending.push(slice);
-		this.#stringPendingBytes += slice.length;
-		if (this.#stringPendingBytes >= DECODE_FLUSH_BYTES) this.#flushPending(true);
+		// Decode the segment in place: no copy, and nothing outlives the chunk.
+		this.#store(this.#stringDecoder?.decode(chunk.subarray(from, to), { stream: true }) ?? "");
 		return true;
-	}
-
-	#flushPending(stream: boolean): void {
-		const decoder = this.#stringDecoder;
-		if (!decoder) return;
-		for (const part of this.#stringPending) this.#store(decoder.decode(part, { stream: true }));
-		this.#stringPending = [];
-		this.#stringPendingBytes = 0;
-		if (!stream) this.#store(decoder.decode());
 	}
 
 	#store(text: string): void {
@@ -471,7 +513,6 @@ class JsonlScanner {
 		this.#stringChars += 1;
 		if (text === "\n") this.#stringNewlines++;
 		if (!this.#stringCapture || this.#stringStored >= this.#stringCap) return;
-		this.#flushPending(true);
 		this.#store(text);
 	}
 
@@ -502,14 +543,14 @@ class JsonlScanner {
 	}
 
 	#endString(): void {
-		this.#flushPending(false);
+		this.#store(this.#stringDecoder?.decode() ?? "");
 		const text = this.#stringParts.join("");
 		this.#stringParts = [];
 		this.#stringDecoder = null;
 		if (this.#stringIsKey) {
 			const frame = this.#stack.at(-1);
 			if (!frame || frame.array) throw new ParseError("key outside object");
-			frame.key = text;
+			if (frame.target !== null) frame.key = text;
 			this.#mode = "colon";
 			return;
 		}
