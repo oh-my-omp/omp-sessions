@@ -19,7 +19,7 @@ omp install https://github.com/oh-my-omp/omp-sessions
 - **查找**：`session://find?text=<词>[&project=.|<bucket>|<路径>][&max=N]` 匹配 prompt 历史（`history.db` 中 omp 的 FTS 索引）、标题和 recap；`session://sessions.jsonl`、`session://here/sessions.jsonl`、`session://projects/<bucket>/sessions.jsonl` 以 JSONL 列出会话元数据。
 - **阅读**：`session://<id 前缀>/timeline` 渲染当前分支：用户、developer、thinking、assistant 正文、IRC、task 派发和子代理结果全文显示；其余工具调用每个一行 `tool(参数) 状态 #<结果条目> // 意图`。`…/entry/<id>` 完整显示一个条目；`…/events.jsonl` 是同一组事件的 JSONL；`…/raw.jsonl` 是文件本身；`…/agents/<AgentId>/…` 对子代理重复这套结构；`…/artifacts/<N>` 与 `…/local/<路径>` 是该会话的 `artifact://` 与 `local://`。
 - **过滤**：`timeline` 和 `events.jsonl` 接受 `?type=<filter>`（事件类型、分组、`call:<工具>`、`marker:<类型>`、排除写法）和 `?since=…&until=…` 时间窗；grep 带 glob 时用路径前缀 `session://type/<filter>/<路径>`。`events.jsonl`、`sessions.jsonl` 与 `find` 接受 `?q=` 执行 jq。
-- **grep**：只有一棵可遍历的树 `session://projects/<bucket>/<YYYY-MM-DD>/<完整 id>/timeline`（及 `…/agents/<AgentId>/timeline`），当前项目可写作 `session://here/…`。每次读取用投影式 tokenizer（`src/scanner.ts`）流式扫一遍文件，不做缓存。
+- **grep**：只有一棵可遍历的树 `session://projects/<bucket>/<YYYY-MM-DD>/<完整 id>/timeline`（及 `…/agents/<AgentId>/timeline`），当前项目可写作 `session://here/…`。每次读取用投影式 tokenizer（`src/scanner.ts`）经一块复用的读缓冲扫描文件：索引遍过一遍全部行选出活动分支，构建遍只读这次读取要显示的分支条目；不做缓存。
 
 ## `session_query`
 
