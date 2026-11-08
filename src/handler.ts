@@ -88,6 +88,9 @@ function jsonl(records: Iterable<unknown>): string {
 	return Array.from(records, (record) => JSON.stringify(record)).join("\n");
 }
 
+/** Records per awaited scratch write: bounded batch memory, one pending write at a time. */
+const SCRATCH_BATCH_RECORDS = 64;
+
 /**
  * JSONL content, or OMP's jq output over it when the URL carries a JSON selector.
  * jq's continuation hint names only its own parameters; `keep` (e.g. `type=…`) is
@@ -103,17 +106,24 @@ async function jsonlResource(
 	if (!selector) return text(url.href, jsonl(records));
 	const scratch = path.join(os.tmpdir(), `omp-sessions-${crypto.randomUUID()}.jsonl`);
 	try {
-		await Bun.write(scratch, ""); // FileSink opens lazily; zero records still need a file for jaq.
-		const writer = Bun.file(scratch).writer();
+		const handle = await fs.open(scratch, "w"); // created empty: zero records still need a file for jaq.
 		try {
-			let first = true;
+			let batch: string[] = [];
+			let started = false;
+			const flush = async (): Promise<void> => {
+				if (batch.length === 0) return;
+				const chunk = batch.join("\n");
+				await handle.writeFile(started ? `\n${chunk}` : chunk);
+				started = true;
+				batch = [];
+			};
 			for (const record of records) {
-				if (first) first = false;
-				else writer.write("\n");
-				writer.write(JSON.stringify(record));
+				batch.push(JSON.stringify(record));
+				if (batch.length === SCRATCH_BATCH_RECORDS) await flush();
 			}
+			await flush();
 		} finally {
-			await writer.end();
+			await handle.close();
 		}
 		const output = await executeJsonQuery(scratch, selector, signal);
 		return text(url.href, keep === "" ? output : output.replaceAll("; append ?", `; append ?${keep}&`));
