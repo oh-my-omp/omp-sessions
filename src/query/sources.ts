@@ -18,37 +18,86 @@ import { identifier, literal } from "./database.ts";
 export const SOURCE_RELATIONS: readonly string[] = ["files", "entries", "sessions", "transcripts", "events"];
 
 /**
- * `src` qualified by name in the call's SQL: `src . <name>`, case-insensitive,
- * optional double quotes and whitespace around the dot and the name.
+ * Words that let a stored view or macro reach `src` without naming one relation:
+ * `src` itself, the catalog views and functions that list relations (`duckdb_*`,
+ * `pg_*`, `sqlite_*`, `information_schema`, `SHOW`, `DESCRIBE`, `SUMMARIZE`), and
+ * the table functions that take a relation name at run time (`query`,
+ * `query_table`, `pragma_*`). A definition holding any of them builds every
+ * relation: its `CREATE VIEW` text is not a SELECT `json_serialize_sql` accepts.
  */
-const SRC_REFERENCE = /\bsrc"?\s*\.\s*"?(files|entries|sessions|transcripts|events)\b/gi;
+const DEFINITION_REACHES_SRC =
+	/\b(?:src|query|query_table|pragma_\w+|duckdb_\w+|pg_\w+|sqlite_\w+|information_schema|show|describe|summarize)\b/i;
 
 /**
- * Text that can reach `src` without naming it: the catalog views and functions
- * that list relations (`duckdb_tables`, `pg_class`, `sqlite_master`,
- * `information_schema`, `SHOW`, `DESCRIBE`, `SUMMARIZE`), and the dynamic table
- * functions that take a relation name at run time. Any of them builds every
- * relation, so a catalog listing shows the same rows as before `src` was built
- * on demand.
+ * A relation the catalog owns: its rows list or describe the relations in `src`
+ * (`information_schema.tables`, `pg_catalog.pg_class`, `sqlite_master`,
+ * `duckdb_*` views), so a query that reads one builds every relation and its
+ * rows match what a fully built `src` shows.
  */
-const CATALOG_OR_DYNAMIC = /\b(?:duckdb_\w+|pg_\w+|sqlite_\w+|information_schema|show|describe|summarize)\b|\bquery(?:_table)?\s*\(/i;
+const CATALOG_SCHEMA = /^(?:information_schema|pg_catalog)$/i;
+const CATALOG_RELATION = /^(?:duckdb|pg|sqlite)_\w+$/i;
 
 /**
- * `all` when `texts` can reach `src` through the catalog or through names only
- * known at run time, else the src relations they name. Building a relation
- * nobody reads only costs allocations; missing one the query reads fails it,
- * so an uncertain text answers `all`.
+ * The `src` relations one query's parse tree names, or `all` when that tree does
+ * not name them: a statement DuckDB cannot serialize to a tree (anything but a
+ * SELECT, so a CTAS included), a parse error, a reference resolved at run time
+ * (a table function or a `SHOW`, whose relation names the tree lacks), or a
+ * catalog relation (whose rows list the relations in `src`).
+ *
+ * The tree is DuckDB's own parse (`json_serialize_sql`), so quoted, commented,
+ * spaced, catalog-qualified, CTE and subquery references arrive as the
+ * `schema_name`/`table_name` they denote; the walk covers every node rather than
+ * recognized shapes. A parse error is not reported from here: `runSql` reports
+ * the query's own error.
  */
-export function referencedRelations(texts: readonly string[]): "all" | ReadonlySet<string> {
-	const names = new Set<string>();
-	for (const text of texts) {
-		if (CATALOG_OR_DYNAMIC.test(text)) return "all";
-		for (const match of text.matchAll(SRC_REFERENCE)) {
-			const name = match[1];
-			if (name !== undefined) names.add(name.toLowerCase());
-		}
+async function parseReferences(connection: DuckDBConnection, sql: string): Promise<"all" | Set<string>> {
+	let parsed: unknown;
+	try {
+		const result = await connection.run("SELECT json_serialize_sql(?)", [sql]);
+		const value = (await result.getRows())[0]?.[0];
+		parsed = typeof value === "string" ? JSON.parse(value) : null;
+	} catch {
+		return "all";
 	}
+	if (parsed === null || typeof parsed !== "object") return "all";
+	const tree = parsed as { error?: unknown; statements?: unknown };
+	if (tree.error === true || !Array.isArray(tree.statements)) return "all";
+	const names = new Set<string>();
+	const walk = (node: unknown): boolean => {
+		if (Array.isArray(node)) {
+			for (const item of node) if (!walk(item)) return false;
+			return true;
+		}
+		if (node === null || typeof node !== "object") return true;
+		const fields = node as Record<string, unknown>;
+		if (fields.type === "TABLE_FUNCTION" || fields.type === "SHOW_REF") return false;
+		if (fields.type === "BASE_TABLE") {
+			const schema = typeof fields.schema_name === "string" ? fields.schema_name.toLowerCase() : "";
+			const table = typeof fields.table_name === "string" ? fields.table_name.toLowerCase() : "";
+			if (CATALOG_SCHEMA.test(schema) || CATALOG_RELATION.test(table)) return false;
+			if (schema === "src" && SOURCE_RELATIONS.includes(table)) names.add(table);
+		}
+		for (const value of Object.values(fields)) if (!walk(value)) return false;
+		return true;
+	};
+	for (const statement of tree.statements) if (!walk(statement)) return "all";
 	return names;
+}
+
+/**
+ * What one call's `src` must hold: `all` when the SQL's parse tree cannot name
+ * its relations exactly, or when a stored view or macro definition can reach
+ * `src`; else the relations the SQL names. Building a relation nobody reads only
+ * costs allocations; missing one the query reads fails it, so an uncertain
+ * answer is `all`.
+ */
+export async function referencedRelations(
+	connection: DuckDBConnection,
+	sql: string,
+	definitions: readonly string[],
+): Promise<"all" | ReadonlySet<string>> {
+	if (definitions.some((text) => DEFINITION_REACHES_SRC.test(text))) return "all";
+	return parseReferences(connection, sql);
 }
 
 /**
@@ -400,7 +449,7 @@ export async function buildSources(
 	await connection.run("DROP SCHEMA IF EXISTS src CASCADE");
 	await connection.run("CREATE SCHEMA src");
 	if (selection) {
-		const referenced = referencedRelations([sql, ...(await definitionTexts(connection))]);
+		const referenced = await referencedRelations(connection, sql, await definitionTexts(connection));
 		const needed = referenced === "all" ? new Set(SOURCE_RELATIONS) : referenced;
 		await sessionRelations(connection, selection, needed, cwd, signal);
 	}
