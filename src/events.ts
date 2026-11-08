@@ -4,8 +4,8 @@
 // OMP's own leaf replay, numbers its turns, and completes tool calls from
 // their results and tool_execution_start records wherever they sit in the
 // file. The build pass then projects only the branch entries a caller asks
-// for, with TIMELINE (speech and tool arguments kept) or LIGHT (structure
-// only), into events. Tool output is measured in the index pass; only
+// for, with TIMELINE (speech and tool arguments kept) or LIGHT (structure and
+// measures only), into events. Tool output is measured in the index pass; only
 // wait/task/fork_task results and async-result messages, whose `<task-result>`
 // blocks become deduplicated subagent results, are captured. Every text has
 // its artifact://, agent://, history:// and local:// references rewritten to
@@ -99,10 +99,29 @@ function entryPolicy(speech: number, arg: number, summary: number, args: Policy)
 /** Everything an event shows. */
 const TIMELINE = entryPolicy(SPEECH, ARG, 400, keepAll(ARG, 500));
 /**
- * An event's structure without its texts: the same kinds, blocks, tools, call
- * status, intent, marker names and turn as TIMELINE, every free text measured only.
+ * A toolCall's arguments in a LIGHT build: the `path`/`i` an event kind reads for
+ * identity, plus the argument fields `callEvent` derives an event from — an
+ * irc_out's body, a dispatch's context and its children — measured (length and
+ * line count, no captured text), with each child's `name` and `agent` kept exact
+ * as TIMELINE keeps them.
  */
-const LIGHT = entryPolicy(0, 0, 0, keys({ path: ID, i: ID }));
+const LIGHT_ARGS = keys({
+	path: ID,
+	i: ID,
+	content: scalar(0),
+	context: scalar(0),
+	task: scalar(0),
+	name: scalar(ARG),
+	agent: scalar(ARG),
+	tasks: each(keys({ name: scalar(ARG), agent: scalar(ARG), task: scalar(0) }), 500),
+});
+/**
+ * An event's structure and measures without its texts: the same kinds, blocks,
+ * tools, call status, intent, marker names and turn as TIMELINE, every free text
+ * measured only, and the arguments an event's text, context and children come
+ * from present as measurements.
+ */
+const LIGHT = entryPolicy(0, 0, 0, LIGHT_ARGS);
 const MEASURED_BLOCK = keys({ type: ID, text: FLAG });
 /**
  * What the index pass reads of every record: tree links, header and title,
@@ -253,13 +272,14 @@ export interface SessionIndex {
 
 /**
  * How the build pass projects one branch entry: `full` builds its events as
- * loadSession returns them; `light` builds the same events with what a filter
- * reads kept exact (kind, entry, block, t, line, turn, a call's id, tool and
- * completed-call facts, IRC ends, marker names, exec status, prompt
- * attribution), every free text measured only (length and line count, not
- * content), and a call's arguments reduced to `path` and `i` — so a dispatch
- * keeps one placeholder child (`?`/`task`/empty task) and loses its context,
- * an irc_out its body, a summary marker its detail. `skip` builds none.
+ * loadSession returns them; `light` builds the same events with what a filter or
+ * a length-based caller reads kept exact (kind, entry, block, t, line, turn, a
+ * call's id, tool and completed-call facts, IRC ends, marker names, exec status,
+ * prompt attribution, a dispatch's children count, each child's name and agent),
+ * and every free text measured only (length and line count, not content):
+ * an irc_out's body, a dispatch's context and its children's tasks carry the
+ * same measures as `full`, while the text itself is not captured. `skip` builds
+ * none.
  */
 export type Build = "full" | "light" | "skip";
 
