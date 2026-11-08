@@ -4,7 +4,7 @@
 
 ## Schema `src`: this call's relations
 
-Built when the call starts from `from` and `tables`, dropped when it ends. Only the relations the query reaches exist: those it names as `src.<name>`, and — when it goes through the catalog (`duckdb_tables()`, `information_schema`, `pg_class`, `sqlite_master`, `SHOW`, `DESCRIBE`, `SUMMARIZE`) or a dynamic table function (`query()`, `query_table()`) — all of them. A view over `src` stops working after the call; keep results with `CREATE TABLE … AS`.
+Built when the call starts from `from` and `tables`, dropped when it ends. A SELECT whose parse tree names `src.<name>` — quotes, comments, whitespace and case included — builds exactly those relations. The call builds every relation when the parse tree names a table function (`query()`, `query_table()`, `pragma_table_info()`, …) or a `SHOW`/`DESCRIBE`/`SUMMARIZE`, when the statement is not a SELECT (`CREATE TABLE … AS`), when DuckDB cannot parse or serialize it, or when a stored view or macro definition mentions `src` or one of those run-time names. A view over `src` stops working after the call; keep results with `CREATE TABLE … AS`.
 
 - `src.files`(sid, agent, parent, file, bytes, modified): each transcript file read: the root (agent `""`) and, with `agents`, every subagent with the allocated id it ran under as `parent`.
 - `src.entries`(file, json, type, id, parent_id, t): every line of those files, read in place from disk when the query runs. `json` is the whole record (`json->>'$.message.role'`, `json_extract`, `unnest(json->'$.message.content')`); join to `src.files` on `file`. All branches, not only the active one. A line still being written fails the query.
