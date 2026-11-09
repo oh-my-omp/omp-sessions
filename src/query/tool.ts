@@ -19,69 +19,182 @@ export const TOOL = "session_query";
 
 const MAX_SESSIONS = 50;
 
+/** The operations this tool serves; `action` selects the request shape. */
+const ACTIONS = ["sessions", "agents", "events", "sql", "export"] as const;
+
 const sid = z.string().min(1).describe("session id or unique id prefix");
 const scalar = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+const project = z.string().min(1).describe("`sessions`: `.` this project, a bucket name or a path; omitted: every project");
+const text = z.string().min(1).describe("`sessions`: words matched against typed prompts, title and recap");
+const since = z.string().describe("`sessions`: ISO date/time; modified at or after");
+const until = z.string().describe("`sessions`: ISO date/time; modified before");
+const query = z
+	.string()
+	.min(1)
+	.describe(
+		"`sql` and `export`: the SQL to run; several statements may be separated by `;` and the last one's result comes back; `export` runs a single SELECT",
+	);
+const path = z.string().min(1).describe("`export`: absolute file path outside the omp sessions directory");
+const format = z.enum(["parquet", "csv", "json"]);
+
 const from = z
 	.object({
-		sids: z.array(sid).min(1).max(MAX_SESSIONS),
+		sids: z.array(sid).min(1).max(MAX_SESSIONS).describe("session ids or unique id prefixes; at most 50"),
 		agents: z.boolean().optional().describe("also read every subagent transcript; default true"),
 	})
 	.strict()
 	.optional()
-	.describe("sessions whose relations this call builds in schema src");
-const tables = z
+	.describe(
+		"`sql` and `export`: the sessions whose relations become schema `src`, read again on every call; omitted: no session relations",
+	);
+
+/** The rows `tables` JSON text carries, once decoded. */
+const tablesValue = z
 	.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/), z.array(z.record(z.string(), z.unknown())).min(1))
-	.optional()
-	.describe("rows from the cell, each becoming table src.<name>");
-const params = z.union([z.array(scalar), z.record(z.string(), scalar)]).optional();
+	.optional();
+/** The bindings `params` JSON text carries, once decoded. */
+const paramsValue = z.union([z.array(scalar), z.record(z.string(), scalar)]).optional();
 
-const schema = z.union([
-	z
-		.object({
-			action: z.literal("sessions"),
-			project: z.string().min(1).optional().describe("`.` this project, a bucket name or a path; omitted: every project"),
-			text: z.string().min(1).optional().describe("words matched against typed prompts, title and recap"),
-			since: z.string().optional().describe("ISO date/time; modified at or after"),
-			until: z.string().optional().describe("ISO date/time; modified before"),
-			limit: z.number().int().min(1).max(ALL_SESSIONS).optional().describe("default 200"),
-		})
-		.strict(),
-	z.object({ action: z.literal("agents"), sid }).strict(),
-	z
-		.object({
-			action: z.literal("events"),
-			sid,
-			agent: z.string().optional().describe("subagent id; omitted: the root transcript"),
-			type: z.string().optional().describe("session:// type filter, e.g. `thinking,irc` or `call:bash`"),
-			offset: z.number().int().min(0).optional(),
-			limit: z.number().int().min(1).max(5000).optional().describe("default 500"),
-		})
-		.strict(),
-	z
-		.object({
-			action: z.literal("sql"),
-			query: z.string().min(1),
-			from,
-			tables,
-			params,
-			limit: z.number().int().min(1).max(100_000).optional().describe("row cap; default 1000"),
-		})
-		.strict(),
-	z
-		.object({
-			action: z.literal("export"),
-			query: z.string().min(1).describe("one SELECT"),
-			path: z.string().min(1).describe("absolute file path outside the omp sessions directory"),
-			format: z.enum(["parquet", "csv", "json"]),
-			from,
-			tables,
-			params,
-		})
-		.strict(),
-]);
+/** What the model sees: one object, `action` selecting which other fields apply. */
+const parameters = z.object({
+	action: z
+		.enum(ACTIONS)
+		.describe(
+			"the operation: `sessions` lists session metadata, `agents` a transcript tree, `events` a page of events, `sql` runs a query, `export` writes a query result to a file",
+		),
+	sid: sid.optional().describe("`agents` and `events`: session id or unique id prefix"),
+	project: project.optional(),
+	text: text.optional(),
+	since: since.optional(),
+	until: until.optional(),
+	agent: z.string().optional().describe("`events`: subagent id; omitted: the root transcript"),
+	type: z.string().optional().describe("`events`: session:// type filter, e.g. `thinking,irc` or `call:bash`"),
+	offset: z
+		.number()
+		.int()
+		.min(0)
+		.optional()
+		.describe("`events`: 0-based index of the first record; default 0; the previous page's `next` continues from there"),
+	limit: z
+		.number()
+		.int()
+		.min(1)
+		.optional()
+		.describe(
+			"row cap: `sessions` default 200 (at most 500), `events` default 500 (at most 5000), `sql` default 1000 (at most 100000); `export` takes none",
+		),
+	query: query.optional(),
+	from,
+	tables: z
+		.string()
+		.optional()
+		.describe(
+			'`sql` and `export`: JSON text of rows from the cell, e.g. `{"t": [{"a": 1}, {"a": 2}]}` becomes table `src.t`; booleans, integers, numbers and strings keep their type, a column of anything else becomes JSON',
+		),
+	params: z
+		.string()
+		.optional()
+		.describe(
+			'`sql` and `export`: JSON text of the bindings for one statement, e.g. `[1, "a"]` for positional `?` or `{"v": "a"}` for named `$v`; values are strings, numbers, booleans or null',
+		),
+	path: path.optional(),
+	format: format.optional().describe("`export`: the file to write: parquet, csv or json"),
+});
 
-type Request = z.infer<typeof schema>;
+const sessionsRequest = z
+	.object({
+		action: z.literal("sessions"),
+		project: project.optional(),
+		text: text.optional(),
+		since: since.optional(),
+		until: until.optional(),
+		limit: z.number().int().min(1).max(ALL_SESSIONS).optional(),
+	})
+	.strict();
+const agentsRequest = z.object({ action: z.literal("agents"), sid }).strict();
+const eventsRequest = z
+	.object({
+		action: z.literal("events"),
+		sid,
+		agent: z.string().optional(),
+		type: z.string().optional(),
+		offset: z.number().int().min(0).optional(),
+		limit: z.number().int().min(1).max(5000).optional(),
+	})
+	.strict();
+const sqlRequest = z
+	.object({
+		action: z.literal("sql"),
+		query,
+		from,
+		tables: tablesValue,
+		params: paramsValue,
+		limit: z.number().int().min(1).max(100_000).optional(),
+	})
+	.strict();
+const exportRequest = z
+	.object({ action: z.literal("export"), query, path, format, from, tables: tablesValue, params: paramsValue })
+	.strict();
+
+/** One request shape per `action`, what `parseRequest` hands the rest of this file. */
+const requests = {
+	sessions: sessionsRequest,
+	agents: agentsRequest,
+	events: eventsRequest,
+	sql: sqlRequest,
+	export: exportRequest,
+} as const;
+type Request =
+	| z.infer<typeof sessionsRequest>
+	| z.infer<typeof agentsRequest>
+	| z.infer<typeof eventsRequest>
+	| z.infer<typeof sqlRequest>
+	| z.infer<typeof exportRequest>;
 type Details = Record<string, unknown>;
+
+/** Field-first text for a zod failure, e.g. `query: must be removed`; the path names the field. */
+function issues(error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] }): string {
+	return error.issues
+		.map((issue) => {
+			const field = issue.path.map(String).join(".");
+			return field === "" ? issue.message : `${field}: ${issue.message}`;
+		})
+		.join("; ");
+}
+
+/** The value a `params` or `tables` argument carries; text that is not JSON fails naming the field. */
+function jsonText(value: string | undefined, name: string): unknown {
+	if (value === undefined) return undefined;
+	try {
+		return JSON.parse(value);
+	} catch (error) {
+		throw new Error(`${name}: not JSON text (${errorText(error)})`);
+	}
+}
+
+/**
+ * The one entry both `approval` and `execute` use: parse the flat `parameters`
+ * object, decode its JSON text, then admit the result as the request shape its
+ * `action` names. Fields that belong to another action and missing required
+ * fields fail here, naming the field.
+ */
+function parseRequest(raw: unknown): Request {
+	const flat = parameters.safeParse(raw);
+	if (!flat.success) throw new Error(issues(flat.error));
+	// The flat parse keeps every declared key, absent ones as `undefined`; a
+	// branch admits only the fields it declares, so drop those and decode first.
+	const decoded = Object.fromEntries(
+		Object.entries({
+			...flat.data,
+			params: jsonText(flat.data.params, "params"),
+			tables: jsonText(flat.data.tables, "tables"),
+		}).filter(([, value]) => value !== undefined),
+	);
+	const request = requests[flat.data.action].safeParse(decoded);
+	if (!request.success) throw new Error(issues(request.error));
+	return request.data;
+}
 
 const DESCRIPTION = [
 	"SQL and row queries over this machine's omp sessions, called from eval: `(await tool.session_query({action, …})).details` in a JS or Python cell.",
@@ -234,9 +347,13 @@ function summary(request: Request, details: Details): string {
 
 /** Writing a file needs write approval; every other action only reads session files. */
 function approval(args: unknown): "read" | "write" {
-	const parsed = schema.safeParse(args);
-	if (!parsed.success) return "write";
-	switch (parsed.data.action) {
+	let request: Request;
+	try {
+		request = parseRequest(args);
+	} catch {
+		return "write";
+	}
+	switch (request.action) {
 		case "sessions":
 		case "agents":
 		case "events":
@@ -245,7 +362,7 @@ function approval(args: unknown): "read" | "write" {
 		case "export":
 			return "write";
 		default: {
-			const unreachable: never = parsed.data;
+			const unreachable: never = request;
 			throw new Error(`Unhandled action ${String(unreachable)}`);
 		}
 	}
@@ -254,22 +371,26 @@ function approval(args: unknown): "read" | "write" {
 /** Query failures are expected (bad SQL, unknown session) and come back as tool errors, not log warnings. */
 export function sessionQueryTool(
 	databases: SessionDatabases,
-): ToolDefinition<typeof schema> & { docTopics(): Readonly<Record<string, string>> } {
+): ToolDefinition<typeof parameters> & { docTopics(): Readonly<Record<string, string>> } {
 	return {
 		name: TOOL,
 		label: tr("Session Query", "会话查询"),
 		description: `${DESCRIPTION}\n\n${TOPIC_POINTERS}`,
 		approval,
-		parameters: schema,
+		parameters,
 		docTopics: topics,
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-			const request = schema.safeParse(rawParams);
-			if (!request.success) return { content: [{ type: "text", text: `session_query: ${request.error.message}` }], isError: true };
+			let request: Request;
 			try {
-				const details = await run(request.data, databases, ctx, signal);
-				return { content: [{ type: "text", text: summary(request.data, details) }], details };
+				request = parseRequest(rawParams);
 			} catch (error) {
-				return { content: [{ type: "text", text: `session_query ${request.data.action} failed: ${errorText(error)}` }], isError: true };
+				return { content: [{ type: "text", text: `session_query: ${errorText(error)}` }], isError: true };
+			}
+			try {
+				const details = await run(request, databases, ctx, signal);
+				return { content: [{ type: "text", text: summary(request, details) }], details };
+			} catch (error) {
+				return { content: [{ type: "text", text: `session_query ${request.action} failed: ${errorText(error)}` }], isError: true };
 			}
 		},
 	};
