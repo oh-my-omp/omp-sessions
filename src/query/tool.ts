@@ -56,51 +56,53 @@ const tablesValue = z
 /** The bindings `params` JSON text carries, once decoded. */
 const paramsValue = z.union([z.array(scalar), z.record(z.string(), scalar)]).optional();
 
-/** What the model sees: one object, `action` selecting which other fields apply. */
-const parameters = z.object({
-	action: z
-		.enum(ACTIONS)
-		.describe(
-			"the operation: `sessions` lists session metadata, `agents` a transcript tree, `events` a page of events, `sql` runs a query, `export` writes a query result to a file",
-		),
-	sid: sid.optional().describe("`agents` and `events`: session id or unique id prefix"),
-	project: project.optional(),
-	text: text.optional(),
-	since: since.optional(),
-	until: until.optional(),
-	agent: z.string().optional().describe("`events`: subagent id; omitted: the root transcript"),
-	type: z.string().optional().describe("`events`: session:// type filter, e.g. `thinking,irc` or `call:bash`"),
-	offset: z
-		.number()
-		.int()
-		.min(0)
-		.optional()
-		.describe("`events`: 0-based index of the first record; default 0; the previous page's `next` continues from there"),
-	limit: z
-		.number()
-		.int()
-		.min(1)
-		.optional()
-		.describe(
-			"row cap: `sessions` default 200 (at most 500), `events` default 500 (at most 5000), `sql` default 1000 (at most 100000); `export` takes none",
-		),
-	query: query.optional(),
-	from,
-	tables: z
-		.string()
-		.optional()
-		.describe(
-			'`sql` and `export`: JSON text of rows from the cell, e.g. `{"t": [{"a": 1}, {"a": 2}]}` becomes table `src.t`; booleans, integers, numbers and strings keep their type, a column of anything else becomes JSON',
-		),
-	params: z
-		.string()
-		.optional()
-		.describe(
-			'`sql` and `export`: JSON text of the bindings for one statement, e.g. `[1, "a"]` for positional `?` or `{"v": "a"}` for named `$v`; values are strings, numbers, booleans or null',
-		),
-	path: path.optional(),
-	format: format.optional().describe("`export`: the file to write: parquet, csv or json"),
-});
+/** What the model sees: one object, `action` selecting which other fields apply. Strict: an undeclared key fails the call. */
+const parameters = z
+	.object({
+		action: z
+			.enum(ACTIONS)
+			.describe(
+				"the operation: `sessions` lists session metadata, `agents` a transcript tree, `events` a page of events, `sql` runs a query, `export` writes a query result to a file",
+			),
+		sid: sid.optional().describe("`agents` and `events`: session id or unique id prefix"),
+		project: project.optional(),
+		text: text.optional(),
+		since: since.optional(),
+		until: until.optional(),
+		agent: z.string().optional().describe("`events`: subagent id; omitted: the root transcript"),
+		type: z.string().optional().describe("`events`: session:// type filter, e.g. `thinking,irc` or `call:bash`"),
+		offset: z
+			.number()
+			.int()
+			.min(0)
+			.optional()
+			.describe("`events`: 0-based index of the first record; default 0; the previous page's `next` continues from there"),
+		limit: z
+			.number()
+			.int()
+			.min(1)
+			.optional()
+			.describe(
+				"row cap: `sessions` default 200 (at most 1000000), `events` default 500 (at most 5000), `sql` default 1000 (at most 100000); `export` takes none",
+			),
+		query: query.optional(),
+		from,
+		tables: z
+			.string()
+			.optional()
+			.describe(
+				'`sql` and `export`: JSON text of rows from the cell, e.g. `{"t": [{"a": 1}, {"a": 2}]}` becomes table `src.t`; booleans, integers, numbers and strings keep their type, a column of anything else becomes JSON',
+			),
+		params: z
+			.string()
+			.optional()
+			.describe(
+				'`sql` and `export`: JSON text of the bindings for one statement, e.g. `[1, "a"]` for positional `?` or `{"v": "a"}` for named `$v`; values are strings, numbers, booleans or null',
+			),
+		path: path.optional(),
+		format: format.optional().describe("`export`: the file to write: parquet, csv or json"),
+	})
+	.strict();
 
 const sessionsRequest = z
 	.object({

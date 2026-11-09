@@ -5,8 +5,10 @@
 // holds the record without the field its text column already carries.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type DuckDBConnection, DuckDBInstance } from "@duckdb/node-api";
+import { SessionDatabases } from "../src/query/database.ts";
 import { runSql } from "../src/query/run.ts";
 import { eventRow, referencedRelations } from "../src/query/sources.ts";
+import { sessionQueryTool } from "../src/query/tool.ts";
 import type { EventRecord, TranscriptRow } from "../src/relations.ts";
 
 /** The answer of one `referencedRelations` call, flattened for comparison. */
@@ -132,6 +134,26 @@ describe("session_query admission", () => {
 		} finally {
 			connection.closeSync();
 			instance.closeSync();
+		}
+	});
+
+	test("an undeclared key fails a sessions call and a sql call, and the error names it", async () => {
+		const databases = new SessionDatabases();
+		try {
+			const tool = sessionQueryTool(databases);
+			// The host passes raw arguments; ctx is read only after parsing succeeds, so it is not needed here.
+			const calls = [
+				{ action: "sessions", bogus: 1 },
+				{ action: "sql", query: "select 1", bogus: 1 },
+			];
+			for (const args of calls) {
+				const result = await tool.execute("admission", args as never, undefined, undefined, undefined as never);
+				const text = result.content.map((part) => ("text" in part ? part.text : "")).join("");
+				expect(result.isError).toBe(true);
+				expect(text).toContain("bogus");
+			}
+		} finally {
+			await databases.close();
 		}
 	});
 });
