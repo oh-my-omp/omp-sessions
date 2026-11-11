@@ -7,10 +7,12 @@
 ## 安装
 
 ```sh
-omp install https://github.com/oh-my-omp/omp-sessions
+omp install https://github.com/oh-my-omp/omp-sessions#release
 ```
 
 入口是包根目录的 `index.ts`，由 `package.json` 的 `omp.extensions` 声明。插件没有设置项。SQL 引擎是 DuckDB（`@duckdb/node-api`，随插件安装的原生模块）。
+
+`#release` 安装已发布的版本。`main` 是开发集成分支，可能带着尚未发布的改动。
 
 ## `session://`
 
@@ -43,6 +45,14 @@ omp install https://github.com/oh-my-omp/omp-sessions
 ## 宿主耦合
 
 所有 omp 内部 import（URL 路由、会话列表、索引与加载辅助函数、`tools/read-json`）集中在 `src/omp-adapter.ts`；omp 升级挪动其中任何一个时在加载时报错。scheme 处理器不覆盖 omp 自带的 `session` scheme 或其他宿主的处理器。
+
+## 发布
+
+PR 暂存改动后运行 `uvx --from lgit-cli lgit`，由它把条目写进 `CHANGELOG.md` 的 `## [Unreleased]`；PR 不改 `package.json` 里的版本号，合并到 `main` 也不发布。
+
+`.github/workflows/omomp-release.yml` 调用共享的 omomp 发布 workflow，每天 GMT+9 02:00（`cron: "0 17 * * *"`）与 `workflow_dispatch` 手动触发。它把 `## [Unreleased]` 变成一个当天的版本段，升起版本号，在 `main` 上提交 `chore: release X.Y.Z`，打 tag `vX.Y.Z`，并把 `release` 分支移到同一提交。`## [Unreleased]` 为空时不发布。
+
+`release` 分支是安装通道，所以上面的安装命令以 `#release` 结尾。
 
 ## 开发
 
