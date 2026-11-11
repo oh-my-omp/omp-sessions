@@ -9,12 +9,16 @@
 	},
 	"files": [
 		"index.ts",
-		"src"
+		"src",
+		"CHANGELOG.md"
 	],
 	"omp": {
 		"extensions": [
 			"./index.ts"
 		]
+	},
+	"omomp": {
+		"changelog": "CHANGELOG.md"
 	},
 	"scripts": {
 		"check": "biome check . && tsc --noEmit",

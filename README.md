@@ -7,10 +7,12 @@ Reads the omp sessions on this machine (`~/.omp/agent/sessions`): the `session:/
 ## Install
 
 ```sh
-omp install https://github.com/oh-my-omp/omp-sessions
+omp install https://github.com/oh-my-omp/omp-sessions#release
 ```
 
 The entry is the package-root `index.ts`, declared by `omp.extensions` in `package.json`. The plugin has no settings. Its SQL engine is DuckDB (`@duckdb/node-api`, a native addon installed with the plugin).
+
+`#release` installs the released version. `main` is where development lands, so it may carry changes that are not released yet.
 
 ## `session://`
 
@@ -43,6 +45,14 @@ Tool labels follow the UI language: `OMOMP_LANG` (`en` or `zh`), then `LC_ALL` /
 ## Host coupling
 
 Every omp-internal import (URL router, session listing, index and loader helpers, `tools/read-json`) sits in `src/omp-adapter.ts`; an omp upgrade that moves one fails there at load. The scheme handler never replaces an omp-owned `session` scheme or another host's handler.
+
+## Release
+
+A pull request stages its changes and runs `uvx --from lgit-cli lgit`, which writes an entry for them under `## [Unreleased]` in `CHANGELOG.md`; the pull request does not change the version in `package.json`, and merging to `main` releases nothing.
+
+`.github/workflows/omomp-release.yml` calls the shared omomp release workflow every day at 02:00 GMT+9 (`cron: "0 17 * * *"`) and on `workflow_dispatch`. It turns `## [Unreleased]` into a version section dated that day, raises the version, commits `chore: release X.Y.Z` on `main`, tags it `vX.Y.Z`, and moves the `release` branch to the same commit. An empty `## [Unreleased]` releases nothing.
+
+The `release` branch is the install channel, which is why the install command above ends in `#release`.
 
 ## Development
 
