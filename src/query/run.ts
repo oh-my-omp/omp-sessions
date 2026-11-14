@@ -143,7 +143,9 @@ function realPath(target: string): string | null {
 /**
  * An absolute export path outside the sessions directory, whose directory exists.
  * Both sides are compared as real paths, so another spelling of the sessions
- * directory (case, 8.3 short names, symbolic links) still lies inside it.
+ * directory (case, 8.3 short names, symbolic links) still lies inside it. omp's
+ * `pathIsWithin` (`@oh-my-pi/pi-utils`) is not used: it resolves with
+ * `fs.realpathSync`, which on Windows keeps 8.3 short names and junctions as written.
  */
 async function exportPath(target: string): Promise<string> {
 	if (!path.isAbsolute(target)) throw new Error(`export path ${target} is not absolute`);
