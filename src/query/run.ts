@@ -4,6 +4,7 @@
 // configure the engine or reach files (COPY, EXPORT, ATTACH, INSTALL, LOAD,
 // SET, PRAGMA, CALL, …) are refused; export writes its file from a separate
 // engine that runs no caller SQL.
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type DuckDBConnection, DuckDBInstance, type Json, JsonDuckDBValueConverter, StatementType } from "@duckdb/node-api";
@@ -129,15 +130,32 @@ export interface ExportResult {
 	readonly columns: readonly string[];
 }
 
-/** An absolute export path outside the sessions directory, whose directory exists. */
+/** The real path of an existing file or directory, or null when there is none. */
+function realPath(target: string): string | null {
+	try {
+		return realpathSync.native(target);
+	} catch {
+		// ENOENT or ENOTDIR: nothing exists at the path.
+		return null;
+	}
+}
+
+/**
+ * An absolute export path outside the sessions directory, whose directory exists.
+ * Both sides are compared as real paths, so another spelling of the sessions
+ * directory (case, 8.3 short names, symbolic links) still lies inside it.
+ */
 async function exportPath(target: string): Promise<string> {
 	if (!path.isAbsolute(target)) throw new Error(`export path ${target} is not absolute`);
 	const resolved = path.resolve(target);
-	const sessions = path.resolve(getSessionsDir());
-	if (resolved === sessions || resolved.startsWith(`${sessions}${path.sep}`))
+	const directory = path.dirname(resolved);
+	const stat = await fs.stat(directory).catch(() => null);
+	if (!stat?.isDirectory()) throw new Error(`export directory ${directory} does not exist`);
+	const real = realPath(resolved) ?? path.join(realPath(directory) ?? directory, path.basename(resolved));
+	const sessions = getSessionsDir();
+	const relative = path.relative(realPath(sessions) ?? path.resolve(sessions), real);
+	if (relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)))
 		throw new Error("export path lies inside the omp sessions directory");
-	const stat = await fs.stat(path.dirname(resolved)).catch(() => null);
-	if (!stat?.isDirectory()) throw new Error(`export directory ${path.dirname(resolved)} does not exist`);
 	return resolved;
 }
 
