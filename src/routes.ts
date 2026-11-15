@@ -6,7 +6,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { EntrySelector } from "./events.ts";
-import { findSessionFiles, getSessionsDir, sessionDirForCwd } from "./omp-adapter.ts";
+import { findSessionFiles, getSessionsDir, readSessionInfo, sessionDirForCwd } from "./omp-adapter.ts";
 
 export type BucketRef = { readonly kind: "named"; readonly name: string } | { readonly kind: "here" };
 export type Locator =
@@ -184,16 +184,144 @@ export function bucketDir(bucket: BucketRef, cwd: string | undefined): string {
 	return path.join(getSessionsDir(), bucketName(bucket, cwd));
 }
 
-/** Session files directly in a bucket, with their ids and creation dates. */
-export async function bucketSessions(dir: string): Promise<Array<{ readonly sid: string; readonly created: Date; readonly file: string }>> {
+/** A session file: its id, its creation instant, and where it is. */
+interface SessionFile {
+	readonly sid: string;
+	readonly created: Date;
+	readonly file: string;
+}
+
+/**
+ * Id and creation instant of a session file without a stamped name, read from its header.
+ * Undefined when the file is not a session, its id cannot be a URL segment (`ID_PREFIX`),
+ * or its `created` is not a date. Never throws.
+ */
+async function headerIdentity(file: string): Promise<{ readonly sid: string; readonly created: Date } | undefined> {
+	const info = await readSessionInfo(file);
+	if (!info || !ID_PREFIX.test(info.id) || Number.isNaN(info.created.getTime())) return undefined;
+	return { sid: info.id, created: info.created };
+}
+
+/** A bucket entry as a session: by its stamped name, else by its header. `stamped` says which. */
+async function entrySession(file: string): Promise<{ readonly session: SessionFile; readonly stamped: boolean } | undefined> {
+	const stamp = fileStamp(path.basename(file));
+	if (stamp) return { session: { ...stamp, file }, stamped: true };
+	if (!file.endsWith(".jsonl")) return undefined;
+	const header = await headerIdentity(file);
+	return header ? { session: { ...header, file }, stamped: false } : undefined;
+}
+
+/**
+ * Session files directly in a bucket. A stamped name gives its id and creation from the name
+ * without reading the file; any other `*.jsonl` name is read through its header. One entry per
+ * (local date, sid): a stamped name wins over a custom one, otherwise the first in readdir order.
+ */
+export async function bucketSessions(dir: string): Promise<SessionFile[]> {
 	const names = await fs.readdir(dir);
-	return names.flatMap((name) => {
-		const stamp = fileStamp(name);
-		return stamp ? [{ ...stamp, file: path.join(dir, name) }] : [];
+	const kept = new Map<string, { readonly session: SessionFile; readonly stamped: boolean }>();
+	for (const name of names) {
+		const entry = await entrySession(path.join(dir, name));
+		if (!entry) continue;
+		const key = `${localDate(entry.session.created)}\0${entry.session.sid}`;
+		const known = kept.get(key);
+		if (!known || (entry.stamped && !known.stamped)) kept.set(key, entry);
+	}
+	return [...kept.values()].map((entry) => entry.session);
+}
+
+/** Whether an enumeration error means the directory is absent or unreadable, which a scan skips. */
+function skippable(err: unknown): boolean {
+	const code = err instanceof Error && "code" in err ? err.code : undefined;
+	return code === "ENOENT" || code === "EACCES" || code === "EPERM" || code === "ENOTDIR";
+}
+
+/** Stamped-name session files an id prefix names: the fast path, empty when none. */
+async function stampedPrefixRefs(prefix: string): Promise<SessionRef[]> {
+	const files = await findSessionFiles(prefix);
+	return files.flatMap((file) => {
+		const stamp = fileStamp(path.basename(file));
+		return stamp ? [{ sid: stamp.sid, file, bucket: path.basename(path.dirname(file)) }] : [];
 	});
 }
 
-/** The root session a locator names; throws on no match or an ambiguous prefix. */
+/** Project buckets under the sessions root; a symlinked bucket is not followed. */
+async function projectBuckets(root: string): Promise<string[]> {
+	try {
+		const entries = await fs.readdir(root, { withFileTypes: true });
+		return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+	} catch (err) {
+		if (skippable(err)) return [];
+		throw err;
+	}
+}
+
+/** `*.jsonl` names in a bucket that are not stamped. */
+async function customNames(dir: string): Promise<string[]> {
+	try {
+		return (await fs.readdir(dir)).filter((name) => name.endsWith(".jsonl") && fileStamp(name) === null);
+	} catch (err) {
+		if (skippable(err)) return [];
+		throw err;
+	}
+}
+
+/** Custom-named session files whose header id starts with `prefix`, across every project bucket. */
+async function headerPrefixRefs(prefix: string): Promise<SessionRef[]> {
+	if (!ID_PREFIX.test(prefix)) return [];
+	const root = getSessionsDir();
+	const found: SessionRef[] = [];
+	for (const bucket of await projectBuckets(root)) {
+		const dir = path.join(root, bucket);
+		for (const name of await customNames(dir)) {
+			const file = path.join(dir, name);
+			const header = await headerIdentity(file);
+			if (header?.sid.startsWith(prefix)) found.push({ sid: header.sid, file, bucket });
+		}
+	}
+	return collapseAliases(found);
+}
+
+/** The real path a file resolves to, or its resolved name when it cannot be resolved. */
+async function realKey(file: string): Promise<string> {
+	try {
+		return await fs.realpath(file);
+	} catch {
+		return path.resolve(file);
+	}
+}
+
+async function isSymlink(file: string): Promise<boolean> {
+	try {
+		return (await fs.lstat(file)).isSymbolicLink();
+	} catch {
+		return false;
+	}
+}
+
+/** Whether `a` is kept over `b` for one transcript: a real file over an alias, then the earlier path. */
+async function keepsOver(a: SessionRef, b: SessionRef): Promise<boolean> {
+	const [aAlias, bAlias] = [await isSymlink(a.file), await isSymlink(b.file)];
+	if (aAlias !== bAlias) return !aAlias;
+	return a.file < b.file;
+}
+
+/** One ref per physical transcript, so aliases of one file (symlinks to the same real path) count once. */
+async function collapseAliases(refs: readonly SessionRef[]): Promise<SessionRef[]> {
+	const kept = new Map<string, SessionRef>();
+	for (const ref of refs) {
+		const key = await realKey(ref.file);
+		const known = kept.get(key);
+		if (!known || (await keepsOver(ref, known))) kept.set(key, ref);
+	}
+	return [...kept.values()];
+}
+
+/**
+ * The root session a locator names; throws on no match or an ambiguous prefix.
+ * A `listed` locator finds a session in its bucket's date listing. A `prefix` locator
+ * uses the stamped names when any match, and only otherwise the custom-named files
+ * whose header id matches.
+ */
 export async function locateSession(locator: Locator, cwd: string | undefined): Promise<SessionRef> {
 	switch (locator.kind) {
 		case "listed": {
@@ -205,15 +333,12 @@ export async function locateSession(locator: Locator, cwd: string | undefined): 
 			return { sid: match.sid, file: match.file, bucket: path.basename(dir) };
 		}
 		case "prefix": {
-			const files = await findSessionFiles(locator.prefix);
-			if (files.length === 0)
+			const stamped = await stampedPrefixRefs(locator.prefix);
+			const refs = stamped.length > 0 ? stamped : await headerPrefixRefs(locator.prefix);
+			if (refs.length === 0)
 				throw new Error(
 					`No session id starts with "${locator.prefix}". Find sessions with session://find?text=<words> or session://sessions.jsonl.`,
 				);
-			const refs = files.flatMap((file) => {
-				const stamp = fileStamp(path.basename(file));
-				return stamp ? [{ sid: stamp.sid, file, bucket: path.basename(path.dirname(file)) }] : [];
-			});
 			const [only, ...others] = refs;
 			if (only && others.length === 0) return only;
 			const shown = refs.slice(0, 8).map((ref) => `${ref.sid} (${ref.bucket})`);
