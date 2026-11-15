@@ -6,7 +6,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { EntrySelector } from "./events.ts";
-import { findSessionFiles, getSessionsDir, sessionDirForCwd } from "./omp-adapter.ts";
+import { getSessionsDir, readSessionInfo, sessionDirForCwd } from "./omp-adapter.ts";
 
 export type BucketRef = { readonly kind: "named"; readonly name: string } | { readonly kind: "here" };
 export type Locator =
@@ -184,13 +184,61 @@ export function bucketDir(bucket: BucketRef, cwd: string | undefined): string {
 	return path.join(getSessionsDir(), bucketName(bucket, cwd));
 }
 
+/** A session file in a project bucket: its id, creation time, and whether its name carries the id and time. */
+export interface BucketSession {
+	readonly sid: string;
+	readonly created: Date;
+	readonly file: string;
+	/** The name is `<stamp>_<id>.jsonl`: id and time come from the name, the header is not read. */
+	readonly stamped: boolean;
+}
+
+/**
+ * The session a bucket file holds, or undefined when it holds none. A stamped name gives the id and
+ * time without reading the file; any other `.jsonl` takes them from its header, and is no session when
+ * the header yields no id or no valid creation time.
+ */
+async function sessionFile(file: string): Promise<BucketSession | undefined> {
+	if (!file.endsWith(".jsonl")) return undefined;
+	const stamp = fileStamp(path.basename(file));
+	if (stamp) return { ...stamp, file, stamped: true };
+	const info = await readSessionInfo(file);
+	if (!info || Number.isNaN(info.created.getTime())) return undefined;
+	return { sid: info.id, created: info.created, file, stamped: false };
+}
+
 /** Session files directly in a bucket, with their ids and creation dates. */
-export async function bucketSessions(dir: string): Promise<Array<{ readonly sid: string; readonly created: Date; readonly file: string }>> {
-	const names = await fs.readdir(dir);
-	return names.flatMap((name) => {
-		const stamp = fileStamp(name);
-		return stamp ? [{ ...stamp, file: path.join(dir, name) }] : [];
-	});
+export async function bucketSessions(dir: string): Promise<BucketSession[]> {
+	const sessions: BucketSession[] = [];
+	for (const name of await fs.readdir(dir)) {
+		const session = await sessionFile(path.join(dir, name));
+		if (session) sessions.push(session);
+	}
+	return sessions;
+}
+
+/** Session files of every project bucket. A bucket that cannot be listed holds no session a lookup can reach. */
+async function allBucketSessions(): Promise<BucketSession[]> {
+	const root = getSessionsDir();
+	const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+	const sessions: BucketSession[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		sessions.push(...(await bucketSessions(path.join(root, entry.name)).catch(() => [])));
+	}
+	return sessions;
+}
+
+/**
+ * Root sessions whose id starts with `prefix`, across every project bucket. Where a stamped file and a
+ * custom-named copy hold the same id, only the stamped file counts; the copy stays reachable by its date.
+ */
+async function prefixSessions(prefix: string): Promise<SessionRef[]> {
+	const matches = (await allBucketSessions()).filter((session) => session.sid.startsWith(prefix));
+	const stampedIds = new Set(matches.filter((session) => session.stamped).map((session) => session.sid));
+	return matches
+		.filter((session) => session.stamped || !stampedIds.has(session.sid))
+		.map((session) => ({ sid: session.sid, file: session.file, bucket: path.basename(path.dirname(session.file)) }));
 }
 
 /** The root session a locator names; throws on no match or an ambiguous prefix. */
@@ -198,22 +246,20 @@ export async function locateSession(locator: Locator, cwd: string | undefined): 
 	switch (locator.kind) {
 		case "listed": {
 			const dir = bucketDir(locator.bucket, cwd);
-			const match = (await bucketSessions(dir)).find(
+			const dated = (await bucketSessions(dir)).filter(
 				(session) => session.sid === locator.sid && localDate(session.created) === locator.date,
 			);
+			// Two files of one id dated the same day: the stamped one answers.
+			const match = dated.find((session) => session.stamped) ?? dated[0];
 			if (!match) throw new Error(`No session ${locator.sid} dated ${locator.date} in ${path.basename(dir)}`);
 			return { sid: match.sid, file: match.file, bucket: path.basename(dir) };
 		}
 		case "prefix": {
-			const files = await findSessionFiles(locator.prefix);
-			if (files.length === 0)
+			const refs = await prefixSessions(locator.prefix);
+			if (refs.length === 0)
 				throw new Error(
 					`No session id starts with "${locator.prefix}". Find sessions with session://find?text=<words> or session://sessions.jsonl.`,
 				);
-			const refs = files.flatMap((file) => {
-				const stamp = fileStamp(path.basename(file));
-				return stamp ? [{ sid: stamp.sid, file, bucket: path.basename(path.dirname(file)) }] : [];
-			});
 			const [only, ...others] = refs;
 			if (only && others.length === 0) return only;
 			const shown = refs.slice(0, 8).map((ref) => `${ref.sid} (${ref.bucket})`);
