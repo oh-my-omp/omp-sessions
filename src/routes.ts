@@ -224,20 +224,24 @@ async function bucketDirs(): Promise<string[]> {
 
 /**
  * Root session files whose id starts with `prefix`. Files named by the stamp are
- * matched by name (findSessionFiles); only when none matches are the other session
- * files of every bucket matched by the id in their headers.
+ * matched by name (findSessionFiles); the other session files of every bucket are
+ * matched by the id in their headers. A header-named file whose id a stamped match
+ * already holds is left out, so a session id shared by several files resolves to
+ * its stamped file; distinct ids from either kind count toward ambiguity.
  */
 async function prefixMatches(prefix: string): Promise<SessionRef[]> {
 	if (!ID_PREFIX.test(prefix)) return [];
-	const named = (await findSessionFiles(prefix)).flatMap((file) => {
+	const refs: SessionRef[] = (await findSessionFiles(prefix)).flatMap((file) => {
 		const stamp = fileStamp(path.basename(file));
 		return stamp ? [{ sid: stamp.sid, file, bucket: path.basename(path.dirname(file)) }] : [];
 	});
-	if (named.length > 0) return named;
-	const refs: SessionRef[] = [];
+	const stampedSids = new Set(refs.map((ref) => ref.sid));
 	for (const dir of await bucketDirs()) {
 		for (const session of await bucketSessions(dir)) {
-			if (session.sid.startsWith(prefix)) refs.push({ sid: session.sid, file: session.file, bucket: path.basename(dir) });
+			if (fileStamp(path.basename(session.file))) continue;
+			if (session.sid.startsWith(prefix) && !stampedSids.has(session.sid)) {
+				refs.push({ sid: session.sid, file: session.file, bucket: path.basename(dir) });
+			}
 		}
 	}
 	return refs;

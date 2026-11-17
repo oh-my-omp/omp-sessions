@@ -24,6 +24,7 @@ const STAMPED = "2026-11-14T10-00-00-000Z_aaa111.jsonl";
 fs.writeFileSync(path.join(bucket, STAMPED), session("zzz999", "2026-11-14T10:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "current.jsonl"), session("bbb222", "2026-11-13T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "copy.jsonl"), session("aaa111", "2026-11-10T12:00:00.000Z"));
+fs.writeFileSync(path.join(bucket, "near.jsonl"), session("aaa999", "2026-11-11T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "left.jsonl"), session("ccc100", "2026-11-12T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "right.jsonl"), session("ccc200", "2026-11-12T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "broken.jsonl"), "not json\n{}\n");
@@ -46,7 +47,7 @@ describe("bucket session files", () => {
 	test("a stamped name is a session by name; other .jsonl files are sessions by header", async () => {
 		const sessions = await bucketSessions(bucket);
 		expect(path.basename(sessions[0]?.file ?? "")).toBe(STAMPED);
-		expect(sessions.map((session) => session.sid).sort()).toEqual(["aaa111", "aaa111", "bbb222", "ccc100", "ccc200"]);
+		expect(sessions.map((session) => session.sid).sort()).toEqual(["aaa111", "aaa111", "aaa999", "bbb222", "ccc100", "ccc200"]);
 		const current = sessions.find((session) => session.sid === "bbb222");
 		expect(current?.created.toISOString()).toBe("2026-11-13T12:00:00.000Z");
 	});
@@ -82,6 +83,10 @@ describe("sid prefix resolution", () => {
 		const ref = await locateSession({ kind: "prefix", prefix: "aaa1" }, undefined);
 		expect(path.basename(ref.file)).toBe(STAMPED);
 		expect(ref.sid).toBe("aaa111");
+	});
+
+	test("a stamped match and a header-named match of another id are ambiguous", async () => {
+		await expect(locateSession({ kind: "prefix", prefix: "aaa" }, undefined)).rejects.toThrow('"aaa" matches 2 sessions');
 	});
 
 	test("a stamped name is matched by its name, not its header id", async () => {
