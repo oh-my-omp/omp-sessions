@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A session file whose name carries no timestamp (one kept under its own name, such as `current.jsonl`, after `omp --resume <path>`) is now reachable: its date directory, its date URL and its sid-prefix URL resolve it, taking the id and creation date from its header. Such a file was listed in `sessions.jsonl` but `session://<sid>` reported it missing. Stamped names keep their id and date from the name, and a stamped file still wins a shared id.
+
 ## [0.1.21] - 2026-11-15
 
 ### Security

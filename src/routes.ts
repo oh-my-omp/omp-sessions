@@ -6,7 +6,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { EntrySelector } from "./events.ts";
-import { findSessionFiles, getSessionsDir, sessionDirForCwd } from "./omp-adapter.ts";
+import { findSessionFiles, getSessionsDir, readSessionInfo, sessionDirForCwd } from "./omp-adapter.ts";
 
 export type BucketRef = { readonly kind: "named"; readonly name: string } | { readonly kind: "here" };
 export type Locator =
@@ -184,13 +184,63 @@ export function bucketDir(bucket: BucketRef, cwd: string | undefined): string {
 	return path.join(getSessionsDir(), bucketName(bucket, cwd));
 }
 
-/** Session files directly in a bucket, with their ids and creation dates. */
-export async function bucketSessions(dir: string): Promise<Array<{ readonly sid: string; readonly created: Date; readonly file: string }>> {
-	const names = await fs.readdir(dir);
-	return names.flatMap((name) => {
+/** A root session file in a bucket: its id, its creation time and its path. */
+export interface BucketSession {
+	readonly sid: string;
+	readonly created: Date;
+	readonly file: string;
+}
+
+/**
+ * Session files directly in a bucket. A name carrying the file stamp gives the id
+ * and creation time, and its header is not read. Any other `.jsonl` is a session
+ * when its header holds an id and a valid creation time, and those give the id and
+ * creation time. Stamped sessions come first, so a session id shared by several
+ * files resolves to its stamped file first.
+ */
+export async function bucketSessions(dir: string): Promise<BucketSession[]> {
+	const stamped: BucketSession[] = [];
+	const other: BucketSession[] = [];
+	for (const name of await fs.readdir(dir)) {
+		const file = path.join(dir, name);
 		const stamp = fileStamp(name);
-		return stamp ? [{ ...stamp, file: path.join(dir, name) }] : [];
+		if (stamp) {
+			stamped.push({ ...stamp, file });
+			continue;
+		}
+		if (!name.endsWith(".jsonl")) continue;
+		const info = await readSessionInfo(file);
+		if (info && !Number.isNaN(info.created.getTime())) other.push({ sid: info.id, created: info.created, file });
+	}
+	return [...stamped, ...other];
+}
+
+/** Project bucket directories under the sessions root; none when the root is missing. */
+async function bucketDirs(): Promise<string[]> {
+	const root = getSessionsDir();
+	const entries = await fs.readdir(root, { withFileTypes: true }).catch((): Dirent[] => []);
+	return entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(root, entry.name));
+}
+
+/**
+ * Root session files whose id starts with `prefix`. Files named by the stamp are
+ * matched by name (findSessionFiles); only when none matches are the other session
+ * files of every bucket matched by the id in their headers.
+ */
+async function prefixMatches(prefix: string): Promise<SessionRef[]> {
+	if (!ID_PREFIX.test(prefix)) return [];
+	const named = (await findSessionFiles(prefix)).flatMap((file) => {
+		const stamp = fileStamp(path.basename(file));
+		return stamp ? [{ sid: stamp.sid, file, bucket: path.basename(path.dirname(file)) }] : [];
 	});
+	if (named.length > 0) return named;
+	const refs: SessionRef[] = [];
+	for (const dir of await bucketDirs()) {
+		for (const session of await bucketSessions(dir)) {
+			if (session.sid.startsWith(prefix)) refs.push({ sid: session.sid, file: session.file, bucket: path.basename(dir) });
+		}
+	}
+	return refs;
 }
 
 /** The root session a locator names; throws on no match or an ambiguous prefix. */
@@ -205,15 +255,11 @@ export async function locateSession(locator: Locator, cwd: string | undefined): 
 			return { sid: match.sid, file: match.file, bucket: path.basename(dir) };
 		}
 		case "prefix": {
-			const files = await findSessionFiles(locator.prefix);
-			if (files.length === 0)
+			const refs = await prefixMatches(locator.prefix);
+			if (refs.length === 0)
 				throw new Error(
 					`No session id starts with "${locator.prefix}". Find sessions with session://find?text=<words> or session://sessions.jsonl.`,
 				);
-			const refs = files.flatMap((file) => {
-				const stamp = fileStamp(path.basename(file));
-				return stamp ? [{ sid: stamp.sid, file, bucket: path.basename(path.dirname(file)) }] : [];
-			});
 			const [only, ...others] = refs;
 			if (only && others.length === 0) return only;
 			const shown = refs.slice(0, 8).map((ref) => `${ref.sid} (${ref.bucket})`);
