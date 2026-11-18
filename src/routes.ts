@@ -195,13 +195,14 @@ export interface BucketSession {
  * Session files directly in a bucket. A name carrying the file stamp gives the id
  * and creation time, and its header is not read. Any other `.jsonl` is a session
  * when its header holds an id and a valid creation time, and those give the id and
- * creation time. Stamped sessions come first, so a session id shared by several
- * files resolves to its stamped file first.
+ * creation time. Stamped sessions come first and each kind is in file-name order,
+ * so a session id shared by several files resolves to its stamped file first, and
+ * without one to the header-named file whose name sorts first.
  */
 export async function bucketSessions(dir: string): Promise<BucketSession[]> {
 	const stamped: BucketSession[] = [];
 	const other: BucketSession[] = [];
-	for (const name of await fs.readdir(dir)) {
+	for (const name of (await fs.readdir(dir)).sort()) {
 		const file = path.join(dir, name);
 		const stamp = fileStamp(name);
 		if (stamp) {

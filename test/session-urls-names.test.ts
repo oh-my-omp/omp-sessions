@@ -27,6 +27,8 @@ fs.writeFileSync(path.join(bucket, "copy.jsonl"), session("aaa111", "2026-11-10T
 fs.writeFileSync(path.join(bucket, "near.jsonl"), session("aaa999", "2026-11-11T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "left.jsonl"), session("ccc100", "2026-11-12T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "right.jsonl"), session("ccc200", "2026-11-12T12:00:00.000Z"));
+fs.writeFileSync(path.join(bucket, "twin-b.jsonl"), session("fff500", "2026-11-16T12:00:00.000Z"));
+fs.writeFileSync(path.join(bucket, "twin-a.jsonl"), session("fff500", "2026-11-16T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "broken.jsonl"), "not json\n{}\n");
 fs.writeFileSync(path.join(bucket, "no-created.jsonl"), session("ddd300", undefined));
 fs.writeFileSync(path.join(bucket, "no-id.jsonl"), session(undefined, "2026-11-12T12:00:00.000Z"));
@@ -47,7 +49,16 @@ describe("bucket session files", () => {
 	test("a stamped name is a session by name; other .jsonl files are sessions by header", async () => {
 		const sessions = await bucketSessions(bucket);
 		expect(path.basename(sessions[0]?.file ?? "")).toBe(STAMPED);
-		expect(sessions.map((session) => session.sid).sort()).toEqual(["aaa111", "aaa111", "aaa999", "bbb222", "ccc100", "ccc200"]);
+		expect(sessions.map((session) => session.sid).sort()).toEqual([
+			"aaa111",
+			"aaa111",
+			"aaa999",
+			"bbb222",
+			"ccc100",
+			"ccc200",
+			"fff500",
+			"fff500",
+		]);
 		const current = sessions.find((session) => session.sid === "bbb222");
 		expect(current?.created.toISOString()).toBe("2026-11-13T12:00:00.000Z");
 	});
@@ -64,6 +75,11 @@ describe("bucket session files", () => {
 		expect(path.basename(ref.file)).toBe("current.jsonl");
 		const copy = await locateSession({ kind: "listed", bucket: named, date: "2026-11-10", sid: "aaa111" }, undefined);
 		expect(path.basename(copy.file)).toBe("copy.jsonl");
+	});
+
+	test("a date URL of an id held by two same-day header-named files opens the one whose name sorts first", async () => {
+		const ref = await locateSession({ kind: "listed", bucket: named, date: "2026-11-16", sid: "fff500" }, undefined);
+		expect(path.basename(ref.file)).toBe("twin-a.jsonl");
 	});
 });
 
