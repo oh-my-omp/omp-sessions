@@ -44,7 +44,7 @@ Tool labels follow the UI language: `OMOMP_LANG` (`en` or `zh`), then `LC_ALL` /
 
 ## Host coupling
 
-Every omp-internal import (URL router, session listing, index and loader helpers, `tools/read-json`) sits in `src/omp-adapter.ts`; an omp upgrade that moves one fails there at load. The scheme handler never replaces an omp-owned `session` scheme or another host's handler.
+Every omp-internal import sits in `src/omp-adapter.ts`; an omp upgrade that moves one fails there at load. The URL router, the session entry types and session listing come from the host's package root and its `internal-urls` barrel, which export them; history storage, the session index and paths, and `tools/read-json` are host subpaths. The scheme handler never replaces an omp-owned `session` scheme or another host's handler.
 
 ## Release
 
