@@ -6,9 +6,9 @@
 // request is parsed once here into a discriminated union.
 import { readFileSync } from "node:fs";
 import { type ExtensionContext, type ToolDefinition, z } from "@oh-my-pi/pi-coding-agent";
+import { tr } from "../../omomp-shared/i18n.ts";
 import { errorText } from "../errors.ts";
 import { parseTypeFilter } from "../filter.ts";
-import { tr } from "../i18n.ts";
 import { ALL_SESSIONS, sessionRows, transcriptEvents, transcriptRow, transcriptTree } from "../relations.ts";
 import { agentFile, locateSession } from "../routes.ts";
 import type { SessionDatabases } from "./database.ts";
