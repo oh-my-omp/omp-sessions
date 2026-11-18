@@ -70,7 +70,8 @@ GREP (walks only this tree, so each session is searched once)
   e.g. grep pattern path=session://here/2026-10-2*/*/timeline ; one grep call covers roughly 7 GB
   of session files in its 30 s budget, so narrow by project and date. raw.jsonl is not listed:
   grep it by its full URL when tool output must be searched. A session file named without a timestamp
-  (current.jsonl) takes its id and date from its header.
+  (current.jsonl) takes its id and date from its header; when several files hold one id on one day,
+  the date directory lists the id once and its URL opens the stamped file.
 
 JQ  (?q=<filter>&raw=true&compact=true&offset=N&limit=N; percent-encode & and %)
   session://<id>/events.jsonl?q=select(.kind=="user")|.text&raw=true
