@@ -14,6 +14,8 @@
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use jaq_core::{
 	Ctx, DataT, Error as CoreError, Exn, RunPtr, Vars, box_iter::box_once, compile, data, load,
@@ -23,7 +25,7 @@ use jaq_json::{Num, Val};
 use jaq_std::ValT as _;
 use jaq_std::input::RcIter;
 
-use crate::error::{EngineError, Result};
+use crate::error::{EngineError, ErrorKind, Result};
 use crate::json::Value;
 
 const DEFAULT_JSON_QUERY_LIMIT: usize = 100;
@@ -936,68 +938,6 @@ fn write_f64(out: &mut String, x: f64) {
 	}
 }
 
-/// jq's `jv_kind_name`.
-fn kind_name(v: &Val) -> &'static str {
-	match v {
-		Val::Null => "null",
-		Val::Bool(_) => "boolean",
-		Val::Num(_) => "number",
-		Val::TStr(_) | Val::BStr(_) => "string",
-		Val::Arr(_) => "array",
-		Val::Obj(_) => "object",
-	}
-}
-
-/// The buffer jq abbreviates a value into for its messages
-/// (`char errbuf[30]`), including the C string's NUL.
-const ERRBUF: usize = 30;
-
-/// `v` dumped compactly and cut to fit a C buffer of `bufsize` bytes, ending
-/// in `...` and the closing delimiter when cut (`jv_dump_string_trunc`).
-fn dump_trunc(v: &Val, bufsize: usize) -> String {
-	// a long string is cut to its first `bufsize` codepoints before dumping,
-	// as jq does, so that dumping never escapes more than can be shown
-	let dumped = match v {
-		Val::TStr(s) | Val::BStr(s) if s.len() > bufsize => {
-			let mut end = 0usize;
-			let mut count = 0usize;
-			while end < s.len() && count < bufsize {
-				end += utf8_next(&s[end..]).1;
-				count += 1;
-			}
-			dump(&Val::utf8_str(s[..end].to_vec())).unwrap_or_default()
-		}
-		v => dump(v).unwrap_or_default(),
-	};
-	if dumped.len() < bufsize {
-		return dumped;
-	}
-	if bufsize < 8 {
-		return String::from_utf8_lossy(&dumped.as_bytes()[..bufsize - 1]).into_owned();
-	}
-	let delim = match dumped.as_bytes()[0] {
-		b'"' => Some('"'),
-		b'[' => Some(']'),
-		b'{' => Some('}'),
-		_ => None,
-	};
-	let mut l = bufsize - if delim.is_some() { 5 } else { 4 };
-	while l > 0 && !dumped.is_char_boundary(l) {
-		l -= 1;
-	}
-	let mut out = String::from(&dumped[..l]);
-	out.push_str("...");
-	if let Some(d) = delim {
-		out.push(d);
-	}
-	out
-}
-
-/// `v` as jq's messages show it: `<kind> (<abbreviated dump>)`.
-fn describe(v: &Val) -> String {
-	format!("{} ({})", kind_name(v), dump_trunc(v, ERRBUF))
-}
-
 // ============================================================================
 // Filter compilation (omp's filter::parse_compile, reduced)
 // ============================================================================
@@ -1009,6 +949,16 @@ struct Kind;
 impl DataT for Kind {
 	type Data<'a> = &'a Data<'a>;
 	type V<'a> = Val;
+
+	const CHECK_CANCELLATION: bool = true;
+
+	fn cancelled(data: &Self::Data<'_>) -> bool {
+		data.session.timed_out.load(Ordering::Relaxed)
+	}
+
+	fn may_recurse(_data: &Self::Data<'_>) -> bool {
+		stacker::remaining_stack().is_none_or(|left| left >= NATIVE_HEADROOM)
+	}
 }
 
 /// What natives see while a filter runs.
@@ -1030,22 +980,25 @@ impl<'a> jaq_std::input::HasInputs<'a, Val> for &'a Data<'a> {
 	}
 }
 
-/// jq builtins that write to the result's stderr, report the input position,
-/// or format as jq's `f_format` does. Registered first: the compiler binds a
-/// call to the first native with a matching name and arity, and these names
-/// are shadowed by definitions in [`DEFS`].
-fn natives() -> [native::Filter<RunPtr<Kind>>; 8] {
+/// Natives that reach the run's session or its inputs, or format tables, as
+/// omp's `jq` builtin registers them (`crates/builtins/src/jq.rs`
+/// `filter::natives`). Listed first: the compiler binds a call to the first
+/// native with a matching name and arity.
+///
+/// - `env`: the engine's environment, which it inherits from omp.
+/// - `debug`, `stderr`, `halt_error`: write to the run's stderr as jq's
+///   `debug_cb`/`stderr_cb` and its `halt_error` handling in `main`.
+/// - `input_filename`, `input_line_number`: the position of the current input.
+/// - `tonumber_`, behind `tonumber`: accepts exactly one number literal.
+/// - `@csv`, `@tsv`: jq's `f_format` for tables.
+fn natives() -> [native::Filter<RunPtr<Kind>>; 9] {
 	[
-		("env", native::v(0), |_cv| {
-			let vars = std::env::vars_os().map(|(k, v)| {
-				(
-					Val::from(k.to_string_lossy().into_owned()),
-					Val::from(v.to_string_lossy().into_owned()),
-				)
-			});
-			box_once(Ok(Val::obj(vars.collect())))
+		("env", native::v(0), |cv| box_once(Ok(cv.0.data().session.env.clone()))),
+		("debug", native::v(0), |cv| {
+			let done = cv.0.data().session.debug(&cv.1);
+			box_once(done.map(|()| cv.1).map_err(Exn::from))
 		}),
-		("stderr_", native::v(0), |cv| {
+		("stderr", native::v(0), |cv| {
 			let session = cv.0.data().session;
 			let done = match &cv.1 {
 				Val::TStr(s) | Val::BStr(s) => {
@@ -1056,11 +1009,11 @@ fn natives() -> [native::Filter<RunPtr<Kind>>; 8] {
 			};
 			box_once(done.map(|()| cv.1).map_err(Exn::from))
 		}),
-		("halt_error_", native::v(1), |mut cv| {
+		("halt_error", native::v(1), |mut cv| {
 			let session = cv.0.data().session;
 			let code = cv.0.pop_var();
 			let Some(code) = code.as_f64() else {
-				let e = CoreError::str(format!("{} halt_error/1: number required", describe(&code)));
+				let e = jaq_json::msg::type_error(&cv.1, "halt_error/1: number required");
 				return box_once(Err(Exn::from(e)));
 			};
 			let done = match &cv.1 {
@@ -1091,13 +1044,8 @@ fn natives() -> [native::Filter<RunPtr<Kind>>; 8] {
 /// `v` as jq writes it in messages: compact JSON.
 fn message(v: &Val) -> std::result::Result<String, CoreError<Val>> {
 	dump(v).map_err(|e| match e {
-		DumpError::Key(key) => object_key(&key),
+		DumpError::Key(key) => jaq_json::msg::object_key(&key),
 	})
-}
-
-/// The error about a non-string object key `k` (jq's `jv_object_set` paths).
-fn object_key(k: &Val) -> CoreError<Val> {
-	CoreError::str(format!("Cannot use {} as object key", describe(k)))
 }
 
 /// jq's `f_tonumber`: numbers pass through; a string must be exactly one
@@ -1105,11 +1053,11 @@ fn object_key(k: &Val) -> CoreError<Val> {
 fn tonumber(v: Val) -> std::result::Result<Val, CoreError<Val>> {
 	let num = match &v {
 		Val::Num(_) => return Ok(v.clone()),
-		Val::TStr(s) | Val::BStr(s) if !s.contains(&0) => jaq_json::read::parse_single_num(s),
+		Val::TStr(s) | Val::BStr(s) if !s.contains(&0) => jaq_json::read::number(s),
 		_ => None,
 	};
 	num.map(Val::Num)
-		.ok_or_else(|| CoreError::str(format!("{} cannot be parsed as a number", describe(&v))))
+		.ok_or_else(|| jaq_json::msg::type_error(&v, "cannot be parsed as a number"))
 }
 
 /// jq's `@csv` and `@tsv` (`f_format`): arrays of scalars; null and NaN are
@@ -1121,7 +1069,7 @@ fn table_row(v: &Val, csv: bool) -> jaq_core::ValX<'static, Val> {
 		} else {
 			"cannot be tsv-formatted, only array"
 		};
-		return Err(CoreError::str(format!("{} {msg}", describe(v))).into());
+		return Err(jaq_json::msg::type_error(v, msg).into());
 	};
 	let mut buf = Vec::new();
 	for (i, field) in row.iter().enumerate() {
@@ -1153,28 +1101,30 @@ fn table_row(v: &Val, csv: bool) -> jaq_core::ValX<'static, Val> {
 			}
 			Val::Bool(_) | Val::Num(_) => buf.extend(message(field)?.into_bytes()),
 			Val::Arr(_) | Val::Obj(_) => {
-				return Err(CoreError::str(format!("{} is not valid in a csv row", describe(field))).into());
+				return Err(jaq_json::msg::type_error(field, "is not valid in a csv row").into());
 			}
 		}
 	}
 	Ok(Val::utf8_str(buf))
 }
 
-/// jq builtins jaq lacks or defines differently, appended to the prelude so
-/// they shadow jaq's definitions: `stderr` and `debug` feed the collected
-/// stderr, `halt_error` halts with jq's exit status, `tonumber` accepts
-/// exactly one number literal, `builtins` lists jq's names.
+/// jq builtins that jaq lacks or defines differently, written in jq, as omp's
+/// `jq` builtin appends them to the prelude, so they shadow jaq's definitions.
 const DEFS: &str = r#"
-def stderr: stderr_;
-def debug: (["DEBUG:", .] | stderr_ | empty), .;
-def debug(msgs): (msgs | debug | empty), .;
-def halt_error($exit_code): (stderr_ | empty), halt_error_($exit_code), empty;
-def halt_error: halt_error(5);
 def tonumber: tonumber_;
 "#;
 
-/// jq's `builtins` (the list jq 1.8.2 itself reports, verbatim).
-const JQ_BUILTINS: &str = r#"["have_literal_numbers/0","have_decnum/0","input_line_number/0","input_filename/0","now/0","localtime/0","gmtime/0","mktime/0","strflocaltime/1","strftime/1","strptime/1","stderr/0","debug/0","input/0","modulemeta/0","get_jq_origin/0","get_prog_origin/0","get_search_list/0","halt_error/1","halt/0","env/0","format/1","error/0","max/0","min/0","bsearch/1","unique/0","sort/0","nan/0","infinite/0","isnormal/0","isnan/0","isinfinite/0","type/0","utf8bytelength/0","length/0","contains/1","has/1","delpaths/1","getpath/1","setpath/2","rtrim/0","ltrim/0","trim/0","implode/0","explode/0","split/1","endswith/1","startswith/1","keys_unsorted/0","keys/0","tostring/0","toboolean/0","tonumber/0","fromjson/0","tojson/0","lgamma_r/0","frexp/0","modf/0","ldexp/2","trunc/0","significand/0","scalbln/2","scalb/2","round/0","rint/0","nexttoward/2","nextafter/2","nearbyint/0","logb/0","log1p/0","lgamma/0","gamma/0","fmod/2","fmin/2","fmax/2","fma/3","fdim/2","fabs/0","expm1/0","exp10/0","erfc/0","erf/0","drem/2","copysign/2","ceil/0","yn/2","jn/2","y1/0","y0/0","tgamma/0","tanh/0","tan/0","sqrt/0","sinh/0","sin/0","remainder/2","pow/2","log2/0","log10/0","log/0","j1/0","j0/0","hypot/2","floor/0","exp2/0","exp/0","cosh/0","cos/0","cbrt/0","atanh/0","atan2/2","atan/0","asinh/0","asin/0","acosh/0","acos/0","empty/0","not/0","path/1","last/1","range/2","halt_error/0","error/1","map/1","select/1","sort_by/1","group_by/1","unique_by/1","max_by/1","min_by/1","add/1","add/0","del/1","abs/0","map_values/1","recurse/1","recurse/2","recurse/0","to_entries/0","from_entries/0","with_entries/1","reverse/0","indices/1","index/1","rindex/1","paths/0","paths/1","isfinite/0","arrays/0","objects/0","iterables/0","booleans/0","numbers/0","normals/0","finites/0","strings/0","nulls/0","values/0","scalars/0","join/1","flatten/1","flatten/0","range/1","fromdateiso8601/0","todateiso8601/0","fromdate/0","todate/0","ltrimstr/1","rtrimstr/1","trimstr/1","match/2","match/1","test/2","test/1","capture/2","capture/1","scan/2","scan/1","splits/2","splits/1","split/2","sub/3","sub/2","gsub/3","gsub/2","while/2","until/2","limit/2","skip/2","range/3","first/1","isempty/1","all/2","any/2","all/1","any/1","all/0","any/0","nth/2","first/0","last/0","nth/1","combinations/0","combinations/1","transpose/0","in/1","inside/1","repeat/1","inputs/0","ascii_downcase/0","ascii_upcase/0","truncate_stream/1","fromstream/1","tostream/0","walk/1","pick/1","debug/1","INDEX/2","INDEX/1","JOIN/2","JOIN/3","JOIN/4","IN/1","IN/2","builtins/0"]"#;
+/// Stack the filter runs on, as omp's `jq` builtin reserves it: evaluation,
+/// printing, comparing and dropping values recurse once per nesting level.
+const STACK: usize = 128 << 20;
+
+/// Stack kept free below the deepest filter: [`Kind`] fails a filter rather
+/// than enter it with less left, so natives that recurse over a deep value
+/// still fit under it.
+const NATIVE_HEADROOM: usize = 32 << 20;
+
+/// omp's read stops a query after this long (read-json.ts `JSON_QUERY_TIMEOUT_MS`).
+const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What escaped a filter: a jq error value, or a halt code.
 enum RunError {
@@ -1191,10 +1141,13 @@ impl From<jaq_core::Exn<'_, Val>> for RunError {
 	}
 }
 
-/// Per-invocation state natives and the run loop share: collected stderr and
-/// the position of the current input.
+/// Per-invocation state natives and the run loop share: the environment,
+/// collected stderr, the timeout flag and the position of the current input.
 struct Session {
+	env: Val,
 	stderr: RefCell<String>,
+	/// Set by the watchdog after [`QUERY_TIMEOUT`]; evaluation polls it.
+	timed_out: Arc<AtomicBool>,
 	/// Newline-terminated records consumed from the input stream so far.
 	position: Cell<usize>,
 }
@@ -1202,6 +1155,15 @@ struct Session {
 impl Session {
 	fn write_stderr(&self, text: &str) {
 		self.stderr.borrow_mut().push_str(text);
+	}
+
+	/// Writes `["DEBUG:",v]` and a newline, as jq's `debug_cb`, compact.
+	fn debug(&self, v: &Val) -> std::result::Result<(), CoreError<Val>> {
+		let msg = Val::from_iter([Val::from(String::from("DEBUG:")), v.clone()]);
+		let mut line = message(&msg)?;
+		line.push('\n');
+		self.write_stderr(&line);
+		Ok(())
 	}
 
 	/// Reports an uncaught error as jq's `process` does.
@@ -1285,27 +1247,12 @@ fn load_errors(errs: load::Errors<&str, ()>) -> Vec<FileReports> {
 						blank: true,
 					})
 					.collect(),
-				load::Error::Lex(errs) => errs
-					.into_iter()
-					.map(|(expected, found)| Report {
-						message: format!("expected {}", expected.as_str()),
-						span: Some(load::span(file.code, found)),
-						blank: false,
-					})
-					.collect(),
 				load::Error::Parse(errs) => errs
 					.into_iter()
-					.map(|(expected, found_text)| {
-						let message = if found_text.is_empty() {
-							format!("expected {}", expected.as_str())
-						} else {
-							format!("expected {}, found {}", expected.as_str(), found_text)
-						};
-						Report {
-							message,
-							span: Some(load::span(file.code, found_text)),
-							blank: false,
-						}
+					.map(|(message, span): load::parse::Error| Report {
+						message,
+						span: span.map(|(start, end)| start..end),
+						blank: false,
 					})
 					.collect(),
 			};
@@ -1323,16 +1270,10 @@ fn compile_errors(errs: compile::Errors<&str, ()>) -> Vec<FileReports> {
 		.map(|(file, errs)| {
 			let reports = errs
 				.into_iter()
-				.map(|(name, undefined)| {
-					let message = match undefined {
-						compile::Undefined::Filter(arity) => format!("{name}/{arity} is not defined"),
-						_ => format!("{name} is not defined"),
-					};
-					Report {
-						message,
-						span: Some(load::span(file.code, name)),
-						blank: false,
-					}
+				.map(|(at, message)| Report {
+					message,
+					span: Some(load::span(file.code, at)),
+					blank: false,
 				})
 				.collect();
 			FileReports {
@@ -1352,30 +1293,42 @@ fn report_compile_errors(reports: &[FileReports]) -> String {
 	text
 }
 
-/// Compile `query` as jq's `main` does: prelude defs, our natives, then
-/// `jaq_core`/`jaq_std`/`jaq_json`, with `$JQ_BUILD_CONFIGURATION`, `$ARGS`
-/// and `$ENV` bound.
-fn compile_filter(query: &str) -> std::result::Result<(jaq_core::Filter<Kind>, Vec<Val>), Vec<FileReports>> {
-	use load::{Arena, File, Loader};
+/// Compile `query` as omp's `jq` builtin does (`filter::parse_compile`) for a
+/// program given on the command line: jaq's prelude plus [`DEFS`], our
+/// natives ahead of jaq's, `builtins` listing every callable filter, and
+/// `$JQ_BUILD_CONFIGURATION`, `$ARGS` and `$ENV` bound as its `binds` does.
+/// There is no module linker: the engine has no program file to resolve
+/// imports from.
+fn compile_filter(query: &str, env: &Val) -> std::result::Result<(jaq_core::Filter<Kind>, Vec<Val>), Vec<FileReports>> {
+	use load::{Arena, Const, File, Loader};
 
-	let mut defs: Vec<_> = jaq_core::defs()
-		.chain(jaq_std::defs())
-		.chain(jaq_json::defs())
-		.collect();
-	// `builtins` reports jq's own list, not what jaq provides.
-	let defs_text = format!("{DEFS}\ndef builtins: {JQ_BUILTINS};");
-	defs.extend(load::parse(&defs_text, |p| p.defs()).unwrap_or_default());
-
+	let arena = Arena::default();
+	let ours = load::parse(DEFS, |p| p.defs()).expect("builtin definitions parse");
+	let mut defs: Vec<_> = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs()).chain(ours).collect();
+	let run = native::run::<Kind>;
+	let inputs = jaq_std::input::funs::<Kind>().into_vec().into_iter().map(run);
 	let funs: Vec<_> = natives()
 		.into_iter()
-		.map(native::run::<Kind>)
+		.map(run)
 		.chain(jaq_core::funs())
 		.chain(jaq_std::funs())
 		.chain(jaq_json::funs())
-		.chain(jaq_std::input::funs::<Kind>().into_vec().into_iter().map(native::run::<Kind>))
+		.chain(inputs)
 		.collect();
+	// `builtins` lists every filter a program can call, as `name/arity`,
+	// except those that jq hides behind an underscore
+	let mut builtins: Vec<String> = Vec::new();
+	let sigs = defs.iter().map(|d| (d.name, d.args.len())).chain(funs.iter().map(|f| (f.0, f.1.len())));
+	for (name, arity) in sigs {
+		let sig = format!("{name}/{arity}");
+		if name.starts_with(char::is_alphabetic) && !builtins.contains(&sig) {
+			builtins.push(sig);
+		}
+	}
+	builtins.push("builtins/0".into());
+	let builtins = format!("def builtins: {};", Const::Arr(builtins.into_iter().map(Const::Str).collect()).dump());
+	defs.extend(load::parse(arena.alloc(builtins), |p| p.defs()).expect("builtins parse"));
 
-	let arena = Arena::default();
 	let loader = Loader::new(defs);
 	let main = File { path: (), code: query };
 	let modules = loader.load(&arena, main).map_err(load_errors)?;
@@ -1385,34 +1338,17 @@ fn compile_filter(query: &str) -> std::result::Result<(jaq_core::Filter<Kind>, V
 		.with_global_vars(["$JQ_BUILD_CONFIGURATION", "$ARGS", "$ENV"]);
 	let filter = compiler.compile(modules).map_err(compile_errors)?;
 
-	let env = Val::obj(
-		std::env::vars_os()
-			.map(|(k, v)| {
-				(
-					Val::from(k.to_string_lossy().into_owned()),
-					Val::from(v.to_string_lossy().into_owned()),
-				)
-			})
-			.collect(),
-	);
-	let named_obj = Val::obj(
-		[(
-			Val::from("JQ_BUILD_CONFIGURATION".to_string()),
-			Val::from(BUILD_CONFIGURATION.to_string()),
-		)]
-		.into_iter()
-		.collect(),
-	);
-	let args = Val::obj(
-		[
-			(Val::from("positional".to_string()), Val::Arr(Rc::new(Vec::new()))),
-			(Val::from("named".to_string()), named_obj),
-		]
-		.into_iter()
-		.collect(),
-	);
-	let vars = vec![Val::from(BUILD_CONFIGURATION.to_string()), args, env];
+	let key = |k: &str| Val::from(k.to_string());
+	let args = [(key("positional"), std::iter::empty::<Val>().collect()), (key("named"), Val::obj(Default::default()))];
+	let vars = vec![Val::from(BUILD_CONFIGURATION.to_string()), Val::obj(args.into_iter().collect()), env.clone()];
 	Ok((filter, vars))
+}
+
+/// The engine's environment as jq's `env`/`$ENV` object.
+fn environment() -> Val {
+	let vars = std::env::vars_os()
+		.map(|(k, v)| (Val::from(k.to_string_lossy().into_owned()), Val::from(v.to_string_lossy().into_owned())));
+	Val::obj(vars.collect())
 }
 
 // ============================================================================
@@ -1471,13 +1407,10 @@ fn run_jq(
 	records: &[Value],
 	filter: &jaq_core::Filter<Kind>,
 	vars: Vec<Val>,
+	session: &Session,
 	render: Render<'_>,
 	stop_after_lines: Option<usize>,
 ) -> RunOutput {
-	let session = Session {
-		stderr: RefCell::new(String::new()),
-		position: Cell::new(0),
-	};
 	// The input stream both the main loop and `input`/`inputs` draw from;
 	// each record consumed advances the error position like jq's line count.
 	let mut at = 0usize;
@@ -1495,7 +1428,7 @@ fn run_jq(
 	let data = Data {
 		lut: &filter.lut,
 		inputs: &iter,
-		session: &session,
+		session,
 	};
 	let ctx = Ctx::<Kind>::new(&data, Vars::new(vars));
 
@@ -1509,6 +1442,9 @@ fn run_jq(
 	let stop_after_lines = stop_after_lines.unwrap_or(usize::MAX);
 
 	'run: for input in &iter {
+		if session.timed_out.load(Ordering::Relaxed) {
+			break;
+		}
 		let Ok(input) = input else {
 			// The record stream cannot fail to parse, so jq's parse-error
 			// path is unreachable here.
@@ -1524,7 +1460,7 @@ fn run_jq(
 						text
 					}
 					Err(DumpError::Key(key)) => {
-						session.report_uncaught(object_key(&key));
+						session.report_uncaught(jaq_json::msg::object_key(&key));
 						status = 5;
 						break;
 					}
@@ -1578,7 +1514,7 @@ fn run_jq(
 }
 
 /// Runs `selector` over `records` as jq's input stream and renders the output
-/// as omp's read does.
+/// as omp's read does, on a [`STACK`]-sized thread and within [`QUERY_TIMEOUT`].
 ///
 /// Without a page, returns jq's output verbatim (minus the final newline).
 /// With one, values are captured compact so each line is exactly one value,
@@ -1586,27 +1522,52 @@ fn run_jq(
 /// array result pages its elements instead. Anything jq wrote to stderr
 /// leads the result.
 ///
-/// ## Differences from omp's patched jaq (its `jq` builtin)
-///
-/// The interpreter is crates.io jaq, so inside the filter language some
-/// behaviors follow jaq rather than jq 1.8.2: parse and type-error wording,
-/// operator and `|=` semantics, the regex engine, module imports, and
-/// number-literal canonicalization (`1e3` prints `1e3`, not `1E+3`; a literal
-/// too large prints verbatim rather than clamping). `input` at end of stream
-/// yields nothing instead of jq's `"break"` error. Input records are already
-/// parsed `Value`s, so number literals in the data are f64-rounded (a literal
-/// `1.500` prints `1.5`), which omp's jq preserves. There is no query
-/// timeout: a diverging filter runs forever, where omp's jq is killed after
-/// 30 s.
+/// The interpreter is omp's vendored jaq. The records are the engine's parsed
+/// events rather than a file jq reads, so errors name the input `<stdin>`
+/// with the record's number, and number literals in the data are f64 values.
 pub fn execute(records: &[Value], selector: &JsonSelector) -> Result<String> {
-	let (filter, vars) = compile_filter(&selector.query).map_err(|reports| {
+	std::thread::scope(|scope| {
+		let worker = std::thread::Builder::new()
+			.stack_size(STACK)
+			.spawn_scoped(scope, || execute_on_stack(records, selector))
+			.map_err(|e| EngineError::new(ErrorKind::Io, format!("cannot start the jq thread: {e}")))?;
+		worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+	})
+}
+
+fn execute_on_stack(records: &[Value], selector: &JsonSelector) -> Result<String> {
+	let env = environment();
+	let (filter, vars) = compile_filter(&selector.query, &env).map_err(|reports| {
 		let text = report_compile_errors(&reports);
 		EngineError::bad_request(failed_query(&text, 3))
 	})?;
+	let session = Session {
+		env,
+		stderr: RefCell::new(String::new()),
+		timed_out: Arc::new(AtomicBool::new(false)),
+		position: Cell::new(0),
+	};
+	// The watchdog sets the flag after the timeout, and ends as soon as this
+	// function drops `_done`.
+	let (_done, done) = std::sync::mpsc::channel::<()>();
+	let flag = Arc::clone(&session.timed_out);
+	std::thread::spawn(move || {
+		if done.recv_timeout(QUERY_TIMEOUT) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+			flag.store(true, Ordering::Relaxed);
+		}
+	});
+	let timed_out = |run: &RunOutput| {
+		(run.stopped.is_none() && session.timed_out.load(Ordering::Relaxed)).then(|| {
+			EngineError::bad_request(format!("JSON query timed out after {} seconds", QUERY_TIMEOUT.as_secs()))
+		})
+	};
 
 	match selector.page {
 		None => {
-			let run = run_jq(records, &filter, vars, Render::Selector(selector), None);
+			let run = run_jq(records, &filter, vars, &session, Render::Selector(selector), None);
+			if let Some(e) = timed_out(&run) {
+				return Err(e);
+			}
 			if run.stopped.is_none() && run.code != 0 {
 				return Err(EngineError::bad_request(failed_query(&run.stderr, run.code)));
 			}
@@ -1617,7 +1578,10 @@ pub fn execute(records: &[Value], selector: &JsonSelector) -> Result<String> {
 		Some(page) => {
 			// jq runs compact so each line is exactly one value, and stops
 			// once the page plus one lookahead value is captured.
-			let run = run_jq(records, &filter, vars, Render::Compact, Some(page.offset + page.limit + 1));
+			let run = run_jq(records, &filter, vars, &session, Render::Compact, Some(page.offset + page.limit + 1));
+			if let Some(e) = timed_out(&run) {
+				return Err(e);
+			}
 			if run.stopped.is_none() && run.code != 0 {
 				return Err(EngineError::bad_request(failed_query(&run.stderr, run.code)));
 			}

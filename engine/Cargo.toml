@@ -33,6 +33,7 @@ regex = "*"
 ryu-js = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
+stacker = "*"
 ts-rs = { version = "*", optional = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -41,6 +42,13 @@ libc = "*"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "*", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
+# omp's vendored jaq, patched to jq 1.8 semantics: the interpreter behind omp's `jq` builtin and
+# `executeJsonQuery`, so `?q=` answers as omp's jq does. A patch, not git dependencies, because the
+# vendored crates depend on each other through crates.io names.
+[patch.crates-io]
+jaq-core = { git = "https://github.com/can1357/oh-my-pi" }
+jaq-json = { git = "https://github.com/can1357/oh-my-pi" }
+jaq-std = { git = "https://github.com/can1357/oh-my-pi" }
 [profile.release]
 codegen-units = 1
 lto = true
