@@ -22,12 +22,13 @@ pub fn reset() {
 	}
 }
 
-/// One transcript file opened for scanning.
+/// One transcript file scanned whole. Reading a listing's session headers or
+/// re-reading lines a whole-file scan located does not count.
 pub fn transcript() {
 	TRANSCRIPTS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Bytes of session JSONL read from disk.
+/// Bytes a whole-file scan read: the sizes of the transcripts it counted.
 pub fn scanned(bytes: u64) {
 	BYTES.fetch_add(bytes, Ordering::Relaxed);
 }

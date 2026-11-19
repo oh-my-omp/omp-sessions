@@ -148,7 +148,6 @@ fn recover_from_lines(file: &Path, need_prompt: &mut bool, need_turn: &mut bool,
 			Ok(0) | Err(_) => return,
 			Ok(_) => {}
 		}
-		crate::metrics::scanned(buf.len() as u64);
 		let mut line: &[u8] = &buf;
 		if let Some(rest) = line.strip_suffix(b"\n") {
 			line = rest;
@@ -198,7 +197,6 @@ fn read_ends(file: &Path, prefix: u64, suffix: u64) -> std::io::Result<(String, 
 	let tail_len = suffix.min(size);
 	let mut head = Vec::with_capacity(head_len as usize);
 	(&mut handle).take(head_len).read_to_end(&mut head)?;
-	crate::metrics::scanned(head.len() as u64);
 	let tail = if tail_len == 0 {
 		Vec::new()
 	} else if size <= head_len {
@@ -207,7 +205,6 @@ fn read_ends(file: &Path, prefix: u64, suffix: u64) -> std::io::Result<(String, 
 		handle.seek(SeekFrom::Start(size - tail_len))?;
 		let mut tail = Vec::with_capacity(tail_len as usize);
 		handle.take(tail_len).read_to_end(&mut tail)?;
-		crate::metrics::scanned(tail.len() as u64);
 		tail
 	};
 	Ok((decode(&head), decode(&tail)))

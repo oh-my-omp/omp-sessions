@@ -1166,7 +1166,6 @@ fn opens_turn(fields: &Obj, agent: &str) -> bool {
 /// The index pass over one session file (`agent` "" for the root session,
 /// else the subagent id; `sid` the root session's full id). No text is captured.
 pub fn index_session(file: &Path, sid: &str, agent: &str) -> Result<SessionIndex> {
-	crate::metrics::transcript();
 	let mut nodes: Vec<IndexNode> = Vec::new();
 	let mut collector = Collector::default();
 	let mut header: Option<Obj> = None;

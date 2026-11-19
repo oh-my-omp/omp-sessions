@@ -909,12 +909,14 @@ fn is_number_literal(buf: &[u8]) -> bool {
 }
 
 /// Scans a whole JSONL file with `policy(line)` for each line, calling
-/// `on_record` per parsed line. Adds the bytes read to [`crate::metrics::scanned`].
+/// `on_record` per parsed line. Counts the file in [`crate::metrics::transcript`]
+/// and the bytes read in [`crate::metrics::scanned`].
 pub fn scan_file(
 	file: &Path,
 	policy: &mut dyn FnMut(u64) -> &'static Policy,
 	on_record: &mut dyn FnMut(ScannedRecord),
 ) -> Result<ScanStats> {
+	metrics::transcript();
 	let mut handle = std::fs::File::open(file).map_err(|error| EngineError::io(file, &error))?;
 	let mut buffer = vec![0u8; READ_BYTES];
 	let mut scanner = Scanner::new(policy, on_record);
@@ -931,7 +933,7 @@ pub fn scan_file(
 
 /// Scans only the given lines of a JSONL file (spans from an earlier scan, in
 /// ascending order), each with `policy(line)`. A line yields the same record a
-/// whole-file scan would. Adds the bytes read to [`crate::metrics::scanned`].
+/// whole-file scan would. The metrics already hold these bytes from that scan.
 pub fn scan_lines(
 	file: &Path,
 	lines: &[LineSpan],
@@ -948,7 +950,6 @@ pub fn scan_lines(
 		while left > 0 {
 			let take = left.min(READ_BYTES as u64) as usize;
 			handle.read_exact(&mut buffer[..take]).map_err(|error| EngineError::io(file, &error))?;
-			metrics::scanned(take as u64);
 			scanner.push(&buffer[..take]);
 			left -= take as u64;
 		}
