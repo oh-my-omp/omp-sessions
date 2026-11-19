@@ -1,3 +1,5 @@
 node_modules/
 *.tgz
 .omp/mcp.json
+engine/target/
+engine/bin/

@@ -1,0 +1,47 @@
+[package]
+name = "omp-sessions-engine"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Reads omp session files for the omp-sessions plugin: session:// rendering, rows and SQL relations"
+
+[lib]
+name = "engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "omp-sessions-engine"
+path = "src/main.rs"
+
+# Prints the TypeScript declarations of the wire protocol (src/protocol.rs); `bun run check`
+# compares them with the committed file.
+[[bin]]
+name = "protocol-ts"
+path = "src/bin/protocol-ts.rs"
+required-features = ["ts"]
+
+[features]
+ts = ["dep:ts-rs"]
+
+[dependencies]
+jaq-core = "*"
+jaq-json = "*"
+jaq-std = "*"
+jiff = "*"
+memchr = "*"
+regex = "*"
+ryu-js = "*"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+ts-rs = { version = "*", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "*"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "*", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
