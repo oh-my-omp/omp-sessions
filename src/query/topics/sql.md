@@ -1,6 +1,6 @@
 # SQL over the session files
 
-`sql` and `export` run DuckDB SQL inside omp, against an in-memory database that belongs to the calling session.
+`sql` and `export` run DuckDB SQL in the calling omp session's query process: an engine process outside omp, started by the session's first `sql` or `export` call, holding an in-memory database that belongs to that session.
 
 ## Schema `src`: this call's relations
 
@@ -8,16 +8,16 @@ Built when the call starts from `from` and `tables`, dropped when it ends. A SEL
 
 - `src.files`(sid, agent, parent, file, bytes, modified): each transcript file read: the root (agent `""`) and, with `agents`, every subagent with the allocated id it ran under as `parent`.
 - `src.entries`(file, json, type, id, parent_id, t): every line of those files, read in place from disk when the query runs. `json` is the whole record (`json->>'$.message.role'`, `json_extract`, `unnest(json->'$.message.content')`); join to `src.files` on `file`. All branches, not only the active one. A line still being written fails the query.
-- `src.sessions`(sid PK, project, cwd, title, created, modified, status, assistant_turns, size, recap, parent, url): the `sessions` action's row of each named session. `parent` is the header's parentSession as written: a file path (forks, task children) or a session id (continuations), not a key.
+- `src.sessions`(sid, project, cwd, title, created, modified, status, assistant_turns, size, parent, url): each named session's metadata from the head and tail of its file. `parent` is the header's parentSession as written: a file path (forks, task children) or a session id (continuations), not a key. Recaps and prompt search live in omp's `archive` eval global.
 - `src.transcripts`(sid, agent, parent, title, created, parent_session, entries, on_branch, events, url): each transcript with its active-branch size.
 - `src.events`(sid, agent, seq, turn, t, kind, entry, block, line, call_id, tool, status, result_entry, text, data, url): the active branch in order, as `events.jsonl` serves it; `data` is the record as JSON without the field that went into `text` (its `text`, or its `source` when it has no `text`). A call joins to its result through `result_entry` within the same (sid, agent). Text over the session:// limits ends in `…[clipped: N chars total]`; `url` reads the entry in full.
 - `src.<name>`: the rows passed in `tables`.
 
 ## Schema `main`: results that last
 
-Tables, views and macros created without a schema (`CREATE TABLE hot AS SELECT …`) stay for the rest of this omp session and every later `sql` call sees them. `/new`, resume, fork or ending the session discard them.
+Tables, views and macros created without a schema (`CREATE TABLE hot AS SELECT …`) stay for the rest of this omp session and every later `sql` call sees them. `/new`, resume, fork or ending the session end the query process and discard them; so does the process exiting on its own, which the call that meets it reports as `engine_exited`.
 
-The session's database holds at most 4 GB in memory. Past that, tables and the joins, sorts and aggregates of a query spill to a private temporary directory that is removed when the database closes; a query that needs a single allocation larger than what is left fails with DuckDB's `Out of Memory Error`.
+The session's database holds at most 4 GB in memory. Past that, tables and the joins, sorts and aggregates of a query spill to a private temporary directory that is removed when the query process ends; a query that needs a single allocation larger than what is left fails with DuckDB's `Out of Memory Error`. That memory belongs to the query process, not to omp.
 
 ## Result size
 
@@ -30,7 +30,7 @@ A `sql` call returns rows as JSON objects, at most `limit` of them (default 1000
 ## What SQL may do
 
 - Admitted: SELECT, INSERT, UPDATE, DELETE, MERGE, CREATE, ALTER, DROP, EXPLAIN. Several statements may run in one call (`CREATE TABLE t AS …; SELECT …`); the last one's result comes back. `params` bind a single statement only.
-- Refused: COPY, EXPORT, ATTACH, INSTALL, LOAD, SET, PRAGMA, CALL and other engine or file statements. File reads work only below the omp sessions directory (`read_json('<session file>', …)`); nothing can be written. Files come out through the `export` action.
+- Refused: ATTACH, INSTALL, LOAD, SET, CALL, PRAGMAs that change settings, and other engine statements; COPY and EXPORT fail with DuckDB's `Permission Error`. File reads work only below the omp sessions directory (`read_json('<session file>', …)`); nothing can be written. Files come out through the `export` action.
 
 ```js
 const from = { sids: ["019a"] };
