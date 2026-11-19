@@ -6,12 +6,16 @@
 //! DuckDB's own text for the value; INTERVAL is `{months, days, micros}` with
 //! `micros` as text; LIST and ARRAY are arrays; a STRUCT is an object, or an
 //! array when its entries are all unnamed; MAP is `[{key, value}]`; UNION is
-//! `{tag, value}`; BLOB escapes bytes as DuckDB casts them to VARCHAR.
+//! `{tag, value}`; BLOB escapes bytes as DuckDB casts them to VARCHAR, and
+//! GEOMETRY is its WKB written the same way; BIGNUM is its decimal text;
+//! VARIANT is decoded and converted as node-api does it ([`variant`]).
 //!
 //! A column's reader is built once from its logical type ([`Reader::of`]) and
 //! then reads any row of a vector of that type.
 
 use std::ffi::c_char;
+
+mod variant;
 
 use libduckdb_sys as ffi;
 
@@ -38,6 +42,9 @@ pub enum Reader {
 	Blob,
 	Uuid,
 	Bit,
+	Bignum,
+	Geometry,
+	Variant,
 	Interval,
 	/// A value whose text DuckDB writes: dates, times, timestamps.
 	Temporal(ffi::DUCKDB_TYPE),
@@ -134,6 +141,9 @@ impl Reader {
 			ffi::DUCKDB_TYPE_DUCKDB_TYPE_BLOB => Reader::Blob,
 			ffi::DUCKDB_TYPE_DUCKDB_TYPE_UUID => Reader::Uuid,
 			ffi::DUCKDB_TYPE_DUCKDB_TYPE_BIT => Reader::Bit,
+			ffi::DUCKDB_TYPE_DUCKDB_TYPE_BIGNUM => Reader::Bignum,
+			ffi::DUCKDB_TYPE_DUCKDB_TYPE_GEOMETRY => Reader::Geometry,
+			ffi::DUCKDB_TYPE_DUCKDB_TYPE_VARIANT => Reader::Variant,
 			ffi::DUCKDB_TYPE_DUCKDB_TYPE_INTERVAL => Reader::Interval,
 			ffi::DUCKDB_TYPE_DUCKDB_TYPE_DATE
 			| ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIME
@@ -221,6 +231,9 @@ impl Reader {
 				Reader::Blob => Value::Str(blob_text(string_bytes(vector, row))),
 				Reader::Uuid => Value::Str(uuid_text(hugeint(at(16)))),
 				Reader::Bit => Value::Str(bit_text(string_bytes(vector, row))),
+				Reader::Bignum => Value::Str(variant::bignum_text(string_bytes(vector, row))),
+				Reader::Geometry => Value::Str(blob_text(string_bytes(vector, row))),
+				Reader::Variant => variant::read(vector, row)?,
 				Reader::Interval => {
 					let interval = at(16).cast::<ffi::duckdb_interval>().read_unaligned();
 					let mut obj = Obj::new();
