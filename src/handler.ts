@@ -206,7 +206,9 @@ async function listing(route: Route, cwd: string | undefined): Promise<ShellFsDi
 		}
 		case "date": {
 			const sessions = await bucketSessions(bucketDir(route.bucket, cwd));
-			return sessions.filter((session) => localDate(session.created) === route.date).map((session) => dir(session.sid));
+			// Several files can hold one session id on one day; the listing names the id once, as the URL opens one file.
+			const sids = new Set(sessions.filter((session) => localDate(session.created) === route.date).map((session) => session.sid));
+			return [...sids].map(dir);
 		}
 		case "sessionDir": {
 			const located = await locate(route.at, cwd);
