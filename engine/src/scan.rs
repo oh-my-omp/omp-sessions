@@ -916,8 +916,8 @@ pub fn scan_file(
 	policy: &mut dyn FnMut(u64) -> &'static Policy,
 	on_record: &mut dyn FnMut(ScannedRecord),
 ) -> Result<ScanStats> {
-	metrics::transcript();
 	let mut handle = std::fs::File::open(file).map_err(|error| EngineError::io(file, &error))?;
+	metrics::transcript();
 	let mut buffer = vec![0u8; READ_BYTES];
 	let mut scanner = Scanner::new(policy, on_record);
 	loop {
