@@ -69,7 +69,8 @@ GREP (walks only this tree, so each session is searched once)
   the date directory lists the id once and its URL opens the stamped file, or without one the file
   whose name sorts first.
 
-JQ  (?q=<filter>&raw=true&compact=true&offset=N&limit=N; percent-encode & and %)
+JQ  (?q=<filter>&raw=true&compact=true&offset=N&limit=N; ?query=<filter> is the same as ?q=, and the
+     first of them counts; percent-encode & and %)
   session://<id>/events.jsonl?q=select(.kind=="user")|.text&raw=true
   session://<id>/events.jsonl?q=select(.kind=="call" and .status=="error")|{t,tool,args,url}
   session://<id>/events.jsonl?q=select(.tool=="bash")|.args.command&raw=true
