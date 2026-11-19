@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::cache::Cache;
 use crate::error::{EngineError, ErrorKind, Result};
 use crate::events::{self, EntrySelector};
 use crate::filter::{self, FilteredRead, TypeFilter};
@@ -297,8 +298,17 @@ fn leaf(target: &Target, url: &UrlParts, context: &Context) -> Result<String> {
 			let types = type_filter(url, target)?;
 			let spec = window_spec(url)?;
 			let located = locate_at(at, context)?;
-			let (loaded, filter) =
-				filter::load_filtered(&located.file, &located.session.sid, &at.agent, types, spec, time::now_ms(), FilteredRead::Timeline)?;
+			let cache = Cache::of(context)?;
+			let (loaded, filter) = filter::load_filtered(
+				cache.as_ref(),
+				&located.file,
+				&located.session.sid,
+				&at.agent,
+				types,
+				spec,
+				time::now_ms(),
+				FilteredRead::Timeline,
+			)?;
 			// omp keeps generated titles in its session index; the journal's own title slot is often empty.
 			let title = if at.agent.is_empty() && loaded.meta.title.as_deref().is_none_or(str::is_empty) {
 				info::read_session_info(&located.file, false).and_then(|info| info.title)
@@ -311,8 +321,17 @@ fn leaf(target: &Target, url: &UrlParts, context: &Context) -> Result<String> {
 			let types = type_filter(url, target)?;
 			let spec = window_spec(url)?;
 			let located = locate_at(at, context)?;
-			let (loaded, filter) =
-				filter::load_filtered(&located.file, &located.session.sid, &at.agent, types, spec, time::now_ms(), FilteredRead::Records)?;
+			let cache = Cache::of(context)?;
+			let (loaded, filter) = filter::load_filtered(
+				cache.as_ref(),
+				&located.file,
+				&located.session.sid,
+				&at.agent,
+				types,
+				spec,
+				time::now_ms(),
+				FilteredRead::Records,
+			)?;
 			// jq's next page keeps the same input: the types as written, the window as absolute bounds.
 			let keep = [
 				filter.types.as_ref().map(|types| format!("type={}", types.source.replace('%', "%25").replace('&', "%26"))),

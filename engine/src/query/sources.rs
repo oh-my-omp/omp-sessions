@@ -16,6 +16,7 @@ use std::sync::{Condvar, LazyLock, Mutex, mpsc};
 use regex::Regex;
 
 use super::{Cancel, failed};
+use crate::cache::Cache;
 use crate::duck::{Appender, Duck, Scalar};
 use crate::error::{EngineError, Result};
 use crate::filter::{self, FilteredRead};
@@ -400,8 +401,9 @@ struct TranscriptRows {
 	events: Vec<Vec<Cell>>,
 }
 
-fn transcript_rows(transcript: &TranscriptRow, wants_events: bool, now: i64) -> Result<TranscriptRows> {
-	let (loaded, filter) = filter::load_filtered(&transcript.file, &transcript.sid, &transcript.agent, None, None, now, FilteredRead::Records)?;
+fn transcript_rows(cache: Option<&Cache>, transcript: &TranscriptRow, wants_events: bool, now: i64) -> Result<TranscriptRows> {
+	let (loaded, filter) =
+		filter::load_filtered(cache, &transcript.file, &transcript.sid, &transcript.agent, None, None, now, FilteredRead::Records)?;
 	let url = ops::transcript_url(&transcript.sid, &transcript.agent);
 	let records = render::event_records(&loaded, &url, &filter);
 	let events = if wants_events {
@@ -438,6 +440,7 @@ const LOAD_WINDOW_PER_WORKER: usize = 4;
 /// the one `append` waits for, so at most that many transcripts' rows are held.
 /// The first failure, in list order, stops the workers and is returned.
 fn load_in_order(
+	cache: Option<&Cache>,
 	transcripts: &[TranscriptRow],
 	wants_events: bool,
 	cancel: &Cancel,
@@ -469,7 +472,7 @@ fn load_in_order(
 					if stop.load(Ordering::Relaxed) {
 						return;
 					}
-					let rows = cancel.check().and_then(|()| transcript_rows(transcript, wants_events, now));
+					let rows = cancel.check().and_then(|()| transcript_rows(cache, transcript, wants_events, now));
 					if sender.send((index, rows)).is_err() {
 						return;
 					}
@@ -551,7 +554,8 @@ fn session_relations(duck: &Duck, selection: &Selection, needed: &Needed, contex
 		}
 	}
 	if transcripts_table.is_some() || events_table.is_some() {
-		load_in_order(&transcripts, events_table.is_some(), cancel, |rows| {
+		let cache = Cache::of(context)?;
+		load_in_order(cache.as_ref(), &transcripts, events_table.is_some(), cancel, |rows| {
 			if let Some(table) = transcripts_table.as_mut() {
 				table.row(rows.transcript, cancel)?;
 			}

@@ -4,6 +4,7 @@
 //! A read process answers `session://` and row requests; the query process
 //! (`query`) answers `sql` and `export` on its DuckDB database.
 
+pub mod cache;
 pub mod duck;
 pub mod error;
 pub mod events;
