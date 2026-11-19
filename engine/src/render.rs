@@ -207,7 +207,7 @@ fn call_tail(call: &Call) -> String {
 fn ref_of(event: &SessionEvent) -> String {
 	match &event.base.block {
 		None => format!("#{}", event.base.entry),
-		Some(block) => format!("{}.{}", event.base.entry, block),
+		Some(block) => format!("#{}.{}", event.base.entry, block),
 	}
 }
 
