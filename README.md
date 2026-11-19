@@ -2,64 +2,25 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Reads the omp sessions on this machine (`~/.omp/agent/sessions`): the `session://` scheme lets `read` and `grep` open other sessions without locating JSONL files by hand, and the `session_query` tool lets eval cells query the same history in JavaScript and SQL.
-
-## Install
-
-```sh
-omp install https://github.com/oh-my-omp/omp-sessions#release
-```
-
-The entry is the package-root `index.ts`, declared by `omp.extensions` in `package.json`. The plugin has no settings. Its SQL engine is DuckDB (`@duckdb/node-api`, a native addon installed with the plugin).
-
-`#release` installs the released version. `main` is where development lands, so it may carry changes that are not released yet.
-
-## `session://`
-
-A read-only internal-URL scheme registered in omp's process-global URL router, so main sessions, subagents and light mode all reach it. `read session://README` returns the full grammar.
-
-- **Find**: `session://find?text=<words>[&project=.|<bucket>|<path>][&max=N]` matches prompt history (omp's FTS index in `history.db`), titles and recaps; `session://sessions.jsonl`, `session://here/sessions.jsonl` and `session://projects/<bucket>/sessions.jsonl` list session metadata as JSONL.
-- **Read**: `session://<id-prefix>/timeline` renders the active branch: user, developer, thinking, assistant text, IRC, task dispatches and subagent results in full; every other tool call is one line, `tool(args) status #<result entry> // intent`. `…/entry/<id>` shows one entry in full; `…/events.jsonl` is the same events as JSONL; `…/raw.jsonl` is the file; `…/agents/<AgentId>/…` repeats the tree for subagents; `…/artifacts/<N>` and `…/local/<path>` are that session's `artifact://` and `local://`.
-- **Filters**: `timeline` and `events.jsonl` take `?type=<filter>` (event kinds, groups, `call:<tool>`, `marker:<what>`, exclusions) and `?since=…&until=…` time windows; `session://type/<filter>/<path>` is the form that survives a grep glob. jq runs on `events.jsonl`, `sessions.jsonl` and `find` with `?q=`.
-- **grep**: one traversable tree, `session://projects/<bucket>/<YYYY-MM-DD>/<full-id>/timeline` (and `…/agents/<AgentId>/timeline`), aliased `session://here/…` for the current project. A session file whose name has no timestamp (one kept under its own name, such as `current.jsonl`) takes its id and date from its header; when several files hold one id on one day, the date directory lists the id once and its URL opens the stamped file, or without one the file whose name sorts first. Each read scans the file with a projecting tokenizer (`src/scanner.ts`) through one reused read buffer: an index pass over every line picks the active branch, then a build pass reads only the branch entries the read shows; nothing is cached.
-
-## `session_query`
-
-A tool eval cells call as `(await tool.session_query({ action, … })).details`, in JavaScript or Python.
-
-| action | result |
-|---|---|
-| `sessions` | session metadata rows, filtered by project, words and a `modified` window |
-| `agents` | a session's transcript tree: the root and every subagent with the id it ran under |
-| `events` | a page of one transcript's active-branch events |
-| `sql` | DuckDB SQL over the sessions named in `from` and the rows passed in `tables` |
-| `export` | one query result written to a parquet, csv or json file the caller names |
-
-- **Online**: each `sql` call builds the relations of schema `src` that its query's parse tree names, for the sessions it names, from the session files as they are then, and drops them when the call ends; a SELECT naming `src.<name>` builds exactly those relations, while a query whose parse tree reaches a table function or a `SHOW`, a non-SELECT statement, a query DuckDB cannot parse, or a stored view or macro mentioning `src` builds every relation. `src.entries` reads every JSONL line in place on disk; `src.events`, `src.transcripts` and `src.sessions` come from the same loaders as `session://`, so they follow the active branch, complete tool calls from their results and carry recaps. No copy of the sessions is kept.
-- **Intermediate results**: tables, views and macros created in schema `main` stay in that session's in-memory database for later calls; `/new`, resume, fork or ending the session discard them. The database holds at most 4 GB in memory and spills the rest to a temporary directory removed with it. Rows from a cell join a query as `src.<name>` through `tables`.
-- **Limits on SQL**: queries and changes to the database's own objects run; COPY, EXPORT, ATTACH, INSTALL, LOAD, SET, PRAGMA, CALL and other engine or file statements are refused. SQL reads files only below the sessions directory and writes none; `export` writes a file, never below the sessions directory, and asks for write approval.
-- Call contracts are the tool topics `xd://session_query/actions` and `xd://session_query/sql` (`src/query/topics/`).
-
-Tool labels follow the UI language: `OMOMP_LANG` (`en` or `zh`), then `LC_ALL` / `LC_MESSAGES` / `LANG`, then English. Descriptions, topics and results stay English.
-
-## Host coupling
-
-Every omp-internal import sits in `src/omp-adapter.ts`; an omp upgrade that moves one fails there at load. The URL router, the session entry types and session listing come from the host's package root and its `internal-urls` barrel, which export them; history storage, the session index and paths, and `tools/read-json` are host subpaths. The scheme handler never replaces an omp-owned `session` scheme or another host's handler.
-
-## Release
-
-A pull request stages its changes and runs `uvx --from lgit-cli lgit`, which writes an entry for them under `## [Unreleased]` in `CHANGELOG.md`; the pull request does not change the version in `package.json`, and merging to `main` releases nothing.
-
-`.github/workflows/omomp-release.yml` calls the shared omomp release workflow every day at 02:00 GMT+9 (`cron: "0 17 * * *"`) and on `workflow_dispatch`. It turns `## [Unreleased]` into a version section dated that day, raises the version, commits `chore: release X.Y.Z` on `main`, tags it `vX.Y.Z`, and moves the `release` branch to the same commit. An empty `## [Unreleased]` releases nothing.
-
-The `release` branch is the install channel, which is why the install command above ends in `#release`.
-
-## Development
-
-```sh
-bun install
-bun run check
-bun test
-```
-
-For local runs, load the entry directly: `omp -e ./index.ts`.
+- **`session://` scheme (read, grep, glob over `~/.omp/agent/sessions`)**
+  - Scheme registration — Does: registers a read-only `session` scheme in omp's process-global internal-URL router, reachable from main sessions, subagents and light mode; it never replaces an omp-owned scheme or another owner's handler. When: once when the extension loads. Example: on conflict omp logs `omp-sessions: <reason>`.
+  - `session://README` — Does: returns the full URL grammar. When: when the model reads it. Example: `read session://README`.
+  - Find — Does: matches prompt history (omp's FTS index in `history.db`), titles and recaps, and lists session metadata as JSONL. When: on read of the URL. Example: `session://find?text=release workflow&project=.&max=5`, `session://here/sessions.jsonl`, `session://projects/<bucket>/sessions.jsonl`.
+  - Timeline — Does: renders a session's active branch with user, developer, thinking, assistant text, IRC, task dispatches and subagent results in full, and every other tool call as one line `tool(args) status #<result entry> // intent`. When: on read of the URL. Example: `session://01a1f4a1/timeline`.
+  - Entries, events and raw file — Does: shows one entry in full, the same events as JSONL, or the session file itself. When: on read of the URL. Example: `session://01a1/entry/<id>`, `session://01a1/events.jsonl`, `session://01a1/raw.jsonl`.
+  - Subagents, artifacts and local files — Does: repeats the tree for each subagent and exposes the session's `artifact://` and `local://`. When: on read of the URL. Example: `session://01a1/agents/ReadmePeers/timeline`, `session://01a1/artifacts/4`, `session://01a1/local/readme-contract.md`.
+  - Filters and jq — Does: filters `timeline` and `events.jsonl` by event kind, group, `call:<tool>`, `marker:<what>` or exclusions and by time window, and runs jq with `?q=` on `events.jsonl`, `sessions.jsonl` and `find`. When: when the URL carries the query. Example: `session://01a1/timeline?type=thinking,irc&since=2h`, `session://sessions.jsonl?q=<jq>`.
+  - grep tree — Does: exposes one traversable tree for `grep`/`glob`, aliased `session://here/…` for the current project, with `session://type/<filter>/<path>` as the filter form that survives a glob. When: when `grep` or `glob` walks a `session://` path. Example: `grep` over `session://here/2026-11-20/*/timeline`; `session://projects/<bucket>/<YYYY-MM-DD>/<full-id>/agents/<AgentId>/timeline`.
+  - On-demand scanning — Does: reads each file with a projecting tokenizer through one reused buffer, an index pass picking the active branch then a build pass reading only the shown entries; nothing is cached, and jq gets a temp JSONL removed before the read returns. When: on every `session://` read. Example: `src/scanner.ts`.
+- **`session_query` tool (JS/Python and SQL over the same history)**
+  - Tool registration and activation — Does: registers `session_query` inactive, then activates it through `applyActiveTools` in canonical order (builtins first in registry order, others by name) so the base system prompt stays identical across `/restart`. When: registered at load; activated on `session_start`. Example: `(await tool.session_query({ action: "sessions", text: "release" })).details` in an eval cell.
+  - `sessions` / `agents` / `events` actions — Does: return session metadata rows (filtered by project, words and a `modified` window), a session's transcript tree, or a page of one transcript's active-branch events. When: when an eval cell calls the action. Example: `tool.session_query({ action: "agents", sid: "01a1" })` → rows `sid agent parent file bytes modified`.
+  - `sql` action and schema `src` — Does: runs DuckDB SQL with the relations its parse tree names (`src.entries`, `src.events`, `src.transcripts`, `src.sessions`, plus rows passed in `tables`) built from the session files at call time and dropped after the call. When: on each `sql` call. Example: `tool.session_query({ action: "sql", from: { sids: ["01a1"] }, query: "select count(*) from src.events" })`.
+  - Per-session database — Does: keeps tables, views and macros created in schema `main` in that session's in-memory database (at most 4 GB in memory, spilling to a temp directory). When: kept across calls; closed on `session_switch` (`/new`, resume, fork) and `session_shutdown`. Example: `CREATE TABLE main.slow AS SELECT …` reused by the next call.
+  - SQL limits — Does: refuses COPY, EXPORT, ATTACH, INSTALL, LOAD, SET, PRAGMA, CALL and other engine or file statements; SQL reads files only below the sessions directory and writes none. When: before each `sql` statement runs. Example: `ATTACH 'x.db'` is refused.
+  - `export` action — Does: writes one query result to a parquet, csv or json file the caller names, never below the sessions directory. When: on an `export` call, which asks for write approval (every other action is `read`). Example: `tool.session_query({ action: "export", query: "select …", path: "/tmp/turns.parquet", format: "parquet" })`.
+  - Direct-call output cap — Does: shows `details` as JSON text in a direct call only when it fits in 8192 characters. When: when `session_query` is called outside eval. Example: `sql: more than 8192 chars of JSON in details; call from eval and read .details`.
+  - `xd://session_query/actions` and `xd://session_query/sql` — Does: document each action's rows and the `src` relations, persistence and allowed SQL. When: when the model reads them; the description's last lines point to them. Example: ``A view over `src` stops working after the call; keep results with `CREATE TABLE … AS`.``
+- **Host coupling and UI language**
+  - Host adapter — Does: keeps every omp-internal import in one file so a host upgrade that moves one fails at load. When: at extension load. Example: `src/omp-adapter.ts`.
+  - Tool label — Does: shows the label in English or Chinese; descriptions, topics and results stay English. When: when the tool is registered. Example: `Session Query` / `会话查询`, chosen by `OMOMP_LANG`, then `LC_ALL`/`LC_MESSAGES`/`LANG`.
