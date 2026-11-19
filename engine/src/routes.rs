@@ -274,7 +274,7 @@ fn hex(b: u8) -> Option<u8> {
 
 /// `decodeURIComponent`: None where JavaScript throws `URIError` (a bad
 /// escape, or escapes that do not form UTF-8).
-fn decode_uri_component(text: &str) -> Option<String> {
+pub(crate) fn decode_uri_component(text: &str) -> Option<String> {
 	if !text.contains('%') {
 		return Some(text.to_owned());
 	}
@@ -461,6 +461,9 @@ fn find_session_files(root: &Path, prefix: &str) -> Result<Vec<PathBuf>> {
 /// header-named files of every bucket by their header id, leaving out ids a
 /// stamped match already holds.
 fn prefix_matches(prefix: &str, context: &Context) -> Result<Vec<SessionRef>> {
+	if !is_id_prefix(prefix) {
+		return Ok(Vec::new());
+	}
 	let root = Path::new(&context.sessions_dir);
 	let mut refs: Vec<SessionRef> = find_session_files(root, prefix)?
 		.into_iter()
