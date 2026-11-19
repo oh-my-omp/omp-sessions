@@ -41,8 +41,6 @@ import {
 } from "./routes.ts";
 import { parseWindow, type WindowSpec, windowQuery } from "./window.ts";
 
-export const HANDLER_MARK = Symbol.for("omp-sessions.session-urls.handler.v1");
-
 const JQ_KEYS: Readonly<Record<string, true>> = { q: true, query: true, raw: true, compact: true, offset: true, limit: true };
 const FIND_KEYS: Readonly<Record<string, true>> = { text: true, project: true, max: true };
 const TYPE_KEYS: Readonly<Record<string, true>> = { type: true };
@@ -206,7 +204,9 @@ async function listing(route: Route, cwd: string | undefined): Promise<ShellFsDi
 		}
 		case "date": {
 			const sessions = await bucketSessions(bucketDir(route.bucket, cwd));
-			return sessions.filter((session) => localDate(session.created) === route.date).map((session) => dir(session.sid));
+			// Several files can hold one session id on one day; the listing names the id once, as the URL opens one file.
+			const sids = new Set(sessions.filter((session) => localDate(session.created) === route.date).map((session) => session.sid));
+			return [...sids].map(dir);
 		}
 		case "sessionDir": {
 			const located = await locate(route.at, cwd);
@@ -378,7 +378,6 @@ function allowedKeys(route: Route): readonly Readonly<Record<string, true>>[] {
 
 export class SessionUrlHandler implements ProtocolHandler {
 	readonly scheme = "session";
-	readonly [HANDLER_MARK] = true;
 	readonly spec: SchemeSpec = { backing: "file", selectors: "lines", immutable: true, linkable: false };
 
 	promptDoc(): string {

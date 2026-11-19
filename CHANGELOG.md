@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A sid-prefix lookup now also matches header-named session files when a stamped name shares the prefix, and distinct ids from stamped names and headers make the prefix ambiguous
+- A session file whose name carries no timestamp (one kept under its own name, such as `current.jsonl`, after `omp --resume <path>`) is now reachable: its date directory, its date URL and its sid-prefix URL resolve it, taking the id and creation date from its header. Such a file was listed in `sessions.jsonl` but `session://<sid>` reported it missing. Stamped names keep their id and date from the name, and a stamped file still wins a shared id; a date directory lists an id shared by several files of that day once, and its URL opens the stamped file, or without one the file whose name sorts first.
+
+## [0.1.22] - 2026-11-19
+
+### Changed
+
+- Updated the shared copy of `i18n.ts` to oh-my-omp/shared@33dbe00.
+
 ## [0.1.21] - 2026-11-15
 
 ### Security
