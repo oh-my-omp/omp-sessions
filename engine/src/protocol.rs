@@ -57,6 +57,55 @@ pub struct Request {
 	pub op: Op,
 }
 
+/// The sessions whose relations fill schema `src` for one `sql` or `export` call.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Selection {
+	/// Session ids or unique id prefixes.
+	pub sids: Vec<String>,
+	/// Whether the subagent transcripts are read too; omitted: true.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[cfg_attr(feature = "ts", ts(optional))]
+	pub agents: Option<bool>,
+}
+
+/// The file format `export` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+	Parquet,
+	Csv,
+	Json,
+}
+
+impl ExportFormat {
+	/// The name DuckDB's `COPY … (FORMAT …)` takes.
+	pub fn name(self) -> &'static str {
+		match self {
+			ExportFormat::Parquet => "parquet",
+			ExportFormat::Csv => "csv",
+			ExportFormat::Json => "json",
+		}
+	}
+}
+
+/// The `cancel` frame of the query process: interrupts request `id`, which
+/// then answers `aborted`. It has no response of its own.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Cancel {
+	pub op: CancelOp,
+	pub id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum CancelOp {
+	#[serde(rename = "cancel")]
+	Cancel,
+}
+
 /// What a request asks for.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -87,6 +136,46 @@ pub enum Op {
 		#[cfg_attr(feature = "ts", ts(optional))]
 		limit: Option<u64>,
 	},
+	/// `session_query` `sql` (query process): runs `query` with this call's `src`.
+	Sql {
+		query: String,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		#[cfg_attr(feature = "ts", ts(optional))]
+		from: Option<Selection>,
+		/// Caller rows that become `src.<name>`.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		#[cfg_attr(feature = "ts", ts(optional, type = "Record<string, Array<Record<string, unknown>>>"))]
+		tables: Option<Value>,
+		/// Bindings of the only statement: positional or by name.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		#[cfg_attr(
+			feature = "ts",
+			ts(optional, type = "Array<string | number | boolean | null> | Record<string, string | number | boolean | null>")
+		)]
+		params: Option<Value>,
+		/// Most rows returned; default 1000.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		#[cfg_attr(feature = "ts", ts(optional))]
+		limit: Option<u64>,
+	},
+	/// `session_query` `export` (query process): writes `query`'s whole result to `path`.
+	Export {
+		query: String,
+		path: String,
+		format: ExportFormat,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		#[cfg_attr(feature = "ts", ts(optional))]
+		from: Option<Selection>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		#[cfg_attr(feature = "ts", ts(optional, type = "Record<string, Array<Record<string, unknown>>>"))]
+		tables: Option<Value>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		#[cfg_attr(
+			feature = "ts",
+			ts(optional, type = "Array<string | number | boolean | null> | Record<string, string | number | boolean | null>")
+		)]
+		params: Option<Value>,
+	},
 }
 
 impl Op {
@@ -98,6 +187,8 @@ impl Op {
 			Op::Locate { .. } => "locate",
 			Op::Agents { .. } => "agents",
 			Op::Events { .. } => "events",
+			Op::Sql { .. } => "sql",
+			Op::Export { .. } => "export",
 		}
 	}
 }
@@ -136,6 +227,18 @@ pub enum Reply {
 		offset: u64,
 		next: Option<u64>,
 	},
+	/// `sql` whose last statement returns rows: at most `limit` of them, within
+	/// the result's character budget; `truncated` when a row was left out.
+	SqlRows {
+		columns: Vec<String>,
+		#[cfg_attr(feature = "ts", ts(type = "Array<Record<string, unknown>>"))]
+		rows: Vec<Value>,
+		truncated: bool,
+	},
+	/// `sql` whose last statement returns no rows: the rows it changed.
+	Changes { changes: u64 },
+	/// `export`: the file written and what it holds.
+	Exported { path: String, format: ExportFormat, rows: u64, columns: Vec<String> },
 }
 
 /// A response frame: exactly one per request.

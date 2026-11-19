@@ -1,4 +1,5 @@
 //! `omp-sessions-engine read`: answers request frames from stdin until it closes.
+//! `omp-sessions-engine query`: the query process of one omp session (`engine::query`).
 //! Stdout carries only response frames; stderr carries one log line per request.
 
 use std::io::{BufRead, Write};
@@ -36,8 +37,9 @@ fn read() -> ExitCode {
 fn main() -> ExitCode {
 	match std::env::args().nth(1).as_deref() {
 		Some("read") => read(),
+		Some("query") => engine::query::serve(),
 		_ => {
-			eprintln!("usage: omp-sessions-engine read   (request frames on stdin, one JSON object per line)");
+			eprintln!("usage: omp-sessions-engine read|query   (request frames on stdin, one JSON object per line)");
 			ExitCode::from(2)
 		}
 	}

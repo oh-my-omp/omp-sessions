@@ -28,12 +28,16 @@ jaq-core = "*"
 jaq-json = "*"
 jaq-std = "*"
 jiff = "*"
+# DuckDB built from its bundled sources with the json and parquet extensions linked in:
+# `src.entries` reads JSONL, `src.events.data` is JSON, and export writes parquet.
+libduckdb-sys = { version = "*", default-features = false, features = ["bundled", "capi-v1", "json", "parquet"] }
 memchr = "*"
 regex = "*"
 ryu-js = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 stacker = "*"
+tempfile = "*"
 ts-rs = { version = "*", optional = true }
 
 [target.'cfg(unix)'.dependencies]

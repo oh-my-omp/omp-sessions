@@ -46,12 +46,52 @@ pathname: string,
  */
 search: string, };
 
-export type Op = { "op": "resolve", url: UrlParts, skipDirectoryListing: boolean, } | { "op": "readDirectory", url: UrlParts, } | { "op": "locate", url: UrlParts, } | { "op": "agents", sid: string, } | { "op": "events", sid: string, agent?: string, type?: string, offset?: number, limit?: number, };
+export type Selection = { 
+/**
+ * Session ids or unique id prefixes.
+ */
+sids: Array<string>, 
+/**
+ * Whether the subagent transcripts are read too; omitted: true.
+ */
+agents?: boolean, };
 
-export type Request = { id: number, protocol: number, context: Context, } & ({ "op": "resolve", url: UrlParts, skipDirectoryListing: boolean, } | { "op": "readDirectory", url: UrlParts, } | { "op": "locate", url: UrlParts, } | { "op": "agents", sid: string, } | { "op": "events", sid: string, agent?: string, type?: string, offset?: number, limit?: number, });
+export type ExportFormat = "parquet" | "csv" | "json";
+
+export type Op = { "op": "resolve", url: UrlParts, skipDirectoryListing: boolean, } | { "op": "readDirectory", url: UrlParts, } | { "op": "locate", url: UrlParts, } | { "op": "agents", sid: string, } | { "op": "events", sid: string, agent?: string, type?: string, offset?: number, limit?: number, } | { "op": "sql", query: string, from?: Selection, 
+/**
+ * Caller rows that become `src.<name>`.
+ */
+tables?: Record<string, Array<Record<string, unknown>>>, 
+/**
+ * Bindings of the only statement: positional or by name.
+ */
+params?: Array<string | number | boolean | null> | Record<string, string | number | boolean | null>, 
+/**
+ * Most rows returned; default 1000.
+ */
+limit?: number, } | { "op": "export", query: string, path: string, format: ExportFormat, from?: Selection, tables?: Record<string, Array<Record<string, unknown>>>, params?: Array<string | number | boolean | null> | Record<string, string | number | boolean | null>, };
+
+export type Request = { id: number, protocol: number, context: Context, } & ({ "op": "resolve", url: UrlParts, skipDirectoryListing: boolean, } | { "op": "readDirectory", url: UrlParts, } | { "op": "locate", url: UrlParts, } | { "op": "agents", sid: string, } | { "op": "events", sid: string, agent?: string, type?: string, offset?: number, limit?: number, } | { "op": "sql", query: string, from?: Selection, 
+/**
+ * Caller rows that become `src.<name>`.
+ */
+tables?: Record<string, Array<Record<string, unknown>>>, 
+/**
+ * Bindings of the only statement: positional or by name.
+ */
+params?: Array<string | number | boolean | null> | Record<string, string | number | boolean | null>, 
+/**
+ * Most rows returned; default 1000.
+ */
+limit?: number, } | { "op": "export", query: string, path: string, format: ExportFormat, from?: Selection, tables?: Record<string, Array<Record<string, unknown>>>, params?: Array<string | number | boolean | null> | Record<string, string | number | boolean | null>, });
 
 export type DirEntry = { name: string, dir: boolean, };
 
-export type Reply = { "kind": "resource", content: string, } | { "kind": "directory", content: string, } | { "kind": "entries", entries: Array<DirEntry>, } | { "kind": "located", file: string | null, } | { "kind": "rows", rows: Array<Record<string, unknown>>, } | { "kind": "page", rows: Array<Record<string, unknown>>, total: number, offset: number, next: number | null, };
+export type Reply = { "kind": "resource", content: string, } | { "kind": "directory", content: string, } | { "kind": "entries", entries: Array<DirEntry>, } | { "kind": "located", file: string | null, } | { "kind": "rows", rows: Array<Record<string, unknown>>, } | { "kind": "page", rows: Array<Record<string, unknown>>, total: number, offset: number, next: number | null, } | { "kind": "sqlRows", columns: Array<string>, rows: Array<Record<string, unknown>>, truncated: boolean, } | { "kind": "changes", changes: number, } | { "kind": "exported", path: string, format: ExportFormat, rows: number, columns: Array<string>, };
 
 export type Response = { id: number, ok: true, result: Reply, } | { id: number, ok: false, error: EngineError, };
+
+export type CancelOp = "cancel";
+
+export type Cancel = { op: CancelOp, id: number, };
