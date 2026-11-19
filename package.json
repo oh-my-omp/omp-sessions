@@ -22,9 +22,10 @@
 		"changelog": "CHANGELOG.md"
 	},
 	"scripts": {
-		"check": "biome check . && tsc --noEmit",
+		"check": "biome check . && tsc --noEmit && bun scripts/engine.ts check",
+		"engine:build": "bun scripts/engine.ts build",
 		"format": "biome check --write .",
-		"test": "bun test"
+		"test": "bun test && bun scripts/engine.ts test"
 	},
 	"dependencies": {
 		"@duckdb/node-api": "latest"

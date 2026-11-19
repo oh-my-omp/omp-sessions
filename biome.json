@@ -6,6 +6,8 @@
 		"includes": [
 			"index.ts",
 			"src/**/*.ts",
+			"!src/engine/protocol.ts",
+			"scripts/**/*.ts",
 			"test/**/*.ts",
 			"omomp-shared/**/*",
 			"biome.json",
