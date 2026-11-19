@@ -104,7 +104,8 @@ pub fn parse_selector(query_string: &str) -> Option<JsonSelector> {
 	if encoded_query.is_none() && !seen {
 		return None;
 	}
-	let encoded = encoded_query.unwrap_or(".");
+	// `match?.[1] || "."`: an empty `q=` is the identity filter too.
+	let encoded = encoded_query.filter(|query| !query.is_empty()).unwrap_or(".");
 	// A filter with a bare `%` (jq modulo) is not valid percent-encoding;
 	// take it verbatim.
 	let query = decode_uri_component(encoded).unwrap_or_else(|| encoded.to_string());
@@ -212,16 +213,25 @@ fn decode_uri_component(encoded: &str) -> Option<String> {
 }
 
 /// `parseInt(value, 10)` kept within `min`: the leading decimal digits of the
-/// trimmed text, else None.
+/// trimmed text after an optional sign, else None. A negative count is below
+/// every `min` except `-0`, which counts as 0.
 fn parse_count(value: &str, min: usize) -> Option<usize> {
 	let text = value.trim_matches(is_js_whitespace);
-	if !text.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
+	let (negative, unsigned) = match text.as_bytes().first() {
+		Some(b'-') => (true, &text[1..]),
+		Some(b'+') => (false, &text[1..]),
+		_ => (false, text),
+	};
+	if !unsigned.bytes().next().is_some_and(|b| b.is_ascii_digit()) {
 		return None;
 	}
-	let digits = text
+	let digits = unsigned
 		.bytes()
 		.take_while(u8::is_ascii_digit)
 		.fold(0usize, |n, b| n.saturating_mul(10).saturating_add(usize::from(b - b'0')));
+	if negative {
+		return (digits == 0 && min == 0).then_some(0);
+	}
 	(digits >= min).then_some(digits)
 }
 
@@ -1668,6 +1678,15 @@ mod tests {
 		// modifiers alone imply `.`
 		assert_eq!(sel("raw=true").query, ".");
 		assert!(sel("raw=true").raw);
+		// an empty filter implies `.`, and the first q=/query= still decides
+		assert_eq!(sel("q=").query, ".");
+		assert_eq!(sel("q=&query=.a").query, ".");
+		assert_eq!(sel("query=&q=.a").query, ".");
+		// counts parse as parseInt does: a sign, then digits
+		assert_eq!(sel("q=.&offset=-0").page.map(|page| page.offset), Some(0));
+		assert_eq!(sel("q=.&limit=%2B2").page.map(|page| page.limit), Some(2));
+		assert!(sel("q=.&limit=-0").page.is_none());
+		assert!(sel("q=.&offset=-3").page.is_none());
 	}
 
 	#[test]
