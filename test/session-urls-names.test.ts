@@ -34,9 +34,15 @@ fs.writeFileSync(path.join(bucket, "no-created.jsonl"), session("ddd300", undefi
 fs.writeFileSync(path.join(bucket, "no-id.jsonl"), session(undefined, "2026-11-12T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "notes.txt"), session("eee400", "2026-11-12T12:00:00.000Z"));
 fs.mkdirSync(path.join(bucket, "folder.jsonl"));
+// A bucket the user cannot list; a lookup across buckets skips it.
+const locked = path.join(agent, "sessions", "--locked--");
+fs.mkdirSync(locked);
+fs.writeFileSync(path.join(locked, "hidden.jsonl"), session("ggg700", "2026-11-12T12:00:00.000Z"));
+fs.chmodSync(locked, 0o000);
 
 beforeAll(() => setAgentDir(agent));
 afterAll(() => {
+	fs.chmodSync(locked, 0o755);
 	if (agentDirBefore === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = agentDirBefore;
 	__resetDirsFromEnvForTests();
@@ -107,6 +113,11 @@ describe("sid prefix resolution", () => {
 
 	test("a stamped name is matched by its name, not its header id", async () => {
 		await expect(locateSession({ kind: "prefix", prefix: "zzz" }, undefined)).rejects.toThrow('No session id starts with "zzz"');
+	});
+
+	test("a bucket that cannot be listed is skipped by a lookup across buckets", async () => {
+		const ref = await locateSession({ kind: "prefix", prefix: "bbb" }, undefined);
+		expect(path.basename(ref.file)).toBe("current.jsonl");
 	});
 
 	test("files that are not sessions match no prefix", async () => {

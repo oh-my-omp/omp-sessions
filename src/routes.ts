@@ -216,6 +216,19 @@ export async function bucketSessions(dir: string): Promise<BucketSession[]> {
 	return [...stamped, ...other];
 }
 
+/** File-system codes of a bucket that cannot be listed: gone, not a directory, or not readable. */
+const UNAVAILABLE_BUCKET = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
+
+/** Sessions of one bucket during a scan of every bucket; an unavailable bucket holds none, as in the host's own scan. */
+async function scannedBucketSessions(dir: string): Promise<BucketSession[]> {
+	try {
+		return await bucketSessions(dir);
+	} catch (error) {
+		if (error instanceof Error && "code" in error && typeof error.code === "string" && UNAVAILABLE_BUCKET.has(error.code)) return [];
+		throw error;
+	}
+}
+
 /** Project bucket directories under the sessions root; none when the root is missing. */
 async function bucketDirs(): Promise<string[]> {
 	const root = getSessionsDir();
@@ -228,7 +241,8 @@ async function bucketDirs(): Promise<string[]> {
  * matched by name (findSessionFiles); the other session files of every bucket are
  * matched by the id in their headers. A header-named file whose id a stamped match
  * already holds is left out, so a session id shared by several files resolves to
- * its stamped file; distinct ids from either kind count toward ambiguity.
+ * its stamped file; distinct ids from either kind count toward ambiguity. A bucket
+ * that cannot be listed is skipped; any other listing error propagates.
  */
 async function prefixMatches(prefix: string): Promise<SessionRef[]> {
 	if (!ID_PREFIX.test(prefix)) return [];
@@ -238,7 +252,7 @@ async function prefixMatches(prefix: string): Promise<SessionRef[]> {
 	});
 	const stampedSids = new Set(refs.map((ref) => ref.sid));
 	for (const dir of await bucketDirs()) {
-		for (const session of await bucketSessions(dir)) {
+		for (const session of await scannedBucketSessions(dir)) {
 			if (fileStamp(path.basename(session.file))) continue;
 			if (session.sid.startsWith(prefix) && !stampedSids.has(session.sid)) {
 				refs.push({ sid: session.sid, file: session.file, bucket: path.basename(dir) });
