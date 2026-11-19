@@ -1,15 +1,6 @@
-// `?since=` / `?until=` time window over timeline events. Accepted values:
-//   30m 2h 3d                     that long before now
-//   2026-10-28                    a local calendar day
-//   2026-10-28T1430[15[.250]]     a local wall time; `T` or a space, colons optional,
-//   2026-10-28T14:30Z / …+0800    a zone (`Z`, `±hhmm`, `±hh:mm`) makes it absolute
-//   1430 / 14:30:15               a wall time on the session's only local date
-// Both bounds include their whole written unit (until=2026-10-28 is that entire
-// day, until=1430 runs through 14:30:59.999); internally the window is
-// half-open [start, end). OMP's read peels a trailing `:<digits>` off an
+// OMP's read peels a trailing `:<digits>` off an
 // internal URL as a line selector, so `until=14:30` at the end of a URL
 // arrives as `until=14`; that truncated shape fails with the colonless forms.
-/** Anything stamped with an entry's timestamp: an event, or a branch entry before its events are built. */
 export interface Timed {
 	readonly t: string;
 }
@@ -25,24 +16,20 @@ interface Clock {
 	readonly minute: number;
 	readonly second: number;
 	readonly milli: number;
-	/** Length of the written unit in ms: a minute, a second, or the fraction's last digit. */
 	readonly unit: number;
 }
 
 export type Bound =
 	| { readonly kind: "ago"; readonly ms: number }
 	| { readonly kind: "day"; readonly day: Day }
-	/** `zone` is minutes east of UTC; null is local time. */
 	| { readonly kind: "moment"; readonly day: Day; readonly clock: Clock; readonly zone: number | null }
 	| { readonly kind: "clock"; readonly clock: Clock };
 
-/** The bounds as written; at least one is present. */
 export interface WindowSpec {
 	readonly since: Bound | null;
 	readonly until: Bound | null;
 }
 
-/** Resolved window in epoch ms: `start` inclusive, `end` exclusive; null is open. */
 export interface TimeWindow {
 	readonly start: number | null;
 	readonly end: number | null;
@@ -55,7 +42,6 @@ const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const CLOCK = String.raw`(\d{2}):?(\d{2})(?::?(\d{2})(?:\.(\d{1,3}))?)?`;
 const MOMENT = new RegExp(String.raw`^(\d{4})-(\d{2})-(\d{2})[T ]${CLOCK}(Z|[+-]\d{2}:?\d{2})?$`, "i");
 const CLOCK_ONLY = new RegExp(`^${CLOCK}$`);
-/** What a peeled `:mm`, `:ss` or zone `:mm` leaves behind. */
 const TRUNCATED = /^(?:\d{4}-\d{2}-\d{2}[T ])?\d{2}$|[T ]\d{2,6}(?:\.\d{1,3})?[+-]\d{2}$/i;
 const UNIT_MS: Readonly<Record<string, number>> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
 
@@ -121,7 +107,6 @@ function parseBound(key: Key, raw: string): Bound {
 	throw badValue(key, raw);
 }
 
-/** Parses the written bounds; null when neither is given. Throws on a malformed value. */
 export function parseWindow(since: string | null, until: string | null): WindowSpec | null {
 	if (since === null && until === null) return null;
 	return { since: since === null ? null : parseBound("since", since), until: until === null ? null : parseBound("until", until) };
@@ -131,7 +116,6 @@ function dayName(value: Day): string {
 	return `${value.year}-${String(value.month).padStart(2, "0")}-${String(value.day).padStart(2, "0")}`;
 }
 
-/** The single local date of the session's timestamped events, for clock-only bounds. */
 function sessionDay(events: readonly Timed[]): Day {
 	const days = new Map<string, Day>();
 	for (const event of events) {
@@ -150,7 +134,6 @@ function sessionDay(events: readonly Timed[]): Day {
 	return only;
 }
 
-/** The half-open span [start, end) of a bound's written unit. */
 function span(bound: Bound, events: readonly Timed[], now: number): { readonly start: number; readonly end: number } {
 	switch (bound.kind) {
 		case "ago":
@@ -177,7 +160,6 @@ function span(bound: Bound, events: readonly Timed[], now: number): { readonly s
 	}
 }
 
-/** Resolves written bounds against the session (clock-only bounds) and `now` (relative bounds). */
 export function resolveWindow(spec: WindowSpec, events: readonly Timed[], now: number): TimeWindow {
 	const start = spec.since === null ? null : span(spec.since, events, now).start;
 	const end = spec.until === null ? null : span(spec.until, events, now).end;
@@ -186,14 +168,12 @@ export function resolveWindow(spec: WindowSpec, events: readonly Timed[], now: n
 	return { start, end };
 }
 
-/** Whether `event` falls in the window; an event without a valid timestamp never does. */
 export function within(window: TimeWindow, event: Timed): boolean {
 	const at = Date.parse(event.t);
 	if (Number.isNaN(at)) return false;
 	return (window.start === null || at >= window.start) && (window.end === null || at < window.end);
 }
 
-/** The window as absolute `since`/`until` query parameters (UTC, millisecond units), so later pages keep the same span. */
 export function windowQuery(window: TimeWindow): string {
 	const parts: string[] = [];
 	if (window.start !== null) parts.push(`since=${encodeURIComponent(new Date(window.start).toISOString())}`);

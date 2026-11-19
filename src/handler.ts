@@ -1,8 +1,3 @@
-// The session:// ProtocolHandler: routes → directory listings (readDirectory,
-// so grep/glob walk the tree), rendered leaves (resolve, built in memory per
-// call, never written to disk), host files (locate: raw.jsonl, artifacts,
-// local) and jq over the event and metadata JSONL (OMP's jaq via
-// executeJsonQuery on a per-call temp file removed before returning).
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -50,7 +45,6 @@ const DEFAULT_FIND = 20;
 interface Located {
 	readonly ref: SessionRef;
 	readonly file: string;
-	/** Canonical URL of this transcript: `session://<sid>` or `…/agents/<id>`. */
 	readonly base: string;
 	readonly root: string;
 }
@@ -63,7 +57,6 @@ function query(url: InternalUrl): URLSearchParams {
 	return new URLSearchParams(url.search.startsWith("?") ? url.search.slice(1) : url.search);
 }
 
-/** Rejects query keys outside `allowed`, naming them. */
 function checkKeys(url: InternalUrl, allowed: readonly Readonly<Record<string, true>>[]): void {
 	for (const key of query(url).keys()) {
 		if (!allowed.some((table) => table[key] === true))
@@ -86,14 +79,8 @@ function jsonl(records: Iterable<unknown>): string {
 	return Array.from(records, (record) => JSON.stringify(record)).join("\n");
 }
 
-/** Records per awaited scratch write: bounded batch memory, one pending write at a time. */
 const SCRATCH_BATCH_RECORDS = 64;
 
-/**
- * JSONL content, or OMP's jq output over it when the URL carries a JSON selector.
- * jq's continuation hint names only its own parameters; `keep` (e.g. `type=…`) is
- * carried into it so the next page keeps the same input.
- */
 async function jsonlResource(
 	url: InternalUrl,
 	records: Iterable<unknown>,
@@ -130,13 +117,12 @@ async function jsonlResource(
 	}
 }
 
-/** The type filter of a URL: its `type/<filter>/` path prefix and every `?type=` value, as one union. */
 function typeFilter(url: InternalUrl, target: Target): TypeFilter | null {
 	return parseTypeFilter([...target.pathTypes, ...query(url).getAll("type")]);
 }
 
 /**
- * The `since`/`until` bounds as written. Read from the raw query: URLSearchParams
+ * Read from the raw query: URLSearchParams
  * would turn the `+` of a `+0800` zone into a space.
  */
 function windowSpec(url: InternalUrl): WindowSpec | null {
@@ -149,7 +135,6 @@ function windowSpec(url: InternalUrl): WindowSpec | null {
 	return parseWindow(value("since"), value("until"));
 }
 
-/** Whether a route takes a type filter: the event views it filters, and the directories a glob walks to reach them. */
 function takesType(route: Route): boolean {
 	switch (route.kind) {
 		case "timeline":
@@ -177,7 +162,6 @@ function takesType(route: Route): boolean {
 	}
 }
 
-/** `find?text=…[&project=.|<bucket>|<path>][&max=N]`: prompt-history FTS plus title/first-prompt/recap words. */
 async function find(url: InternalUrl, cwd: string | undefined): Promise<SessionRow[]> {
 	const params = query(url);
 	const needle = params.get("text")?.trim() ?? "";
@@ -187,7 +171,6 @@ async function find(url: InternalUrl, cwd: string | undefined): Promise<SessionR
 	return sessionRows({ project: params.get("project"), text: needle, since: null, until: null, limit: max }, cwd);
 }
 
-/** Directory entries for a directory route, or null for a leaf. */
 async function listing(route: Route, cwd: string | undefined): Promise<ShellFsDirEntry[] | null> {
 	const dir = (name: string): ShellFsDirEntry => ({ name, fileType: ShellFsFileType.Dir });
 	const file = (name: string): ShellFsDirEntry => ({ name, fileType: ShellFsFileType.File });
@@ -204,7 +187,6 @@ async function listing(route: Route, cwd: string | undefined): Promise<ShellFsDi
 		}
 		case "date": {
 			const sessions = await bucketSessions(bucketDir(route.bucket, cwd));
-			// Several files can hold one session id on one day; the listing names the id once, as the URL opens one file.
 			const sids = new Set(sessions.filter((session) => localDate(session.created) === route.date).map((session) => session.sid));
 			return [...sids].map(dir);
 		}
@@ -235,7 +217,6 @@ async function listing(route: Route, cwd: string | undefined): Promise<ShellFsDi
 	}
 }
 
-/** Host file behind a file-backed leaf, or null when the leaf is rendered or carries a query. */
 async function hostFile(route: Route, url: InternalUrl, cwd: string | undefined): Promise<string | null> {
 	switch (route.kind) {
 		case "raw":
@@ -301,7 +282,6 @@ async function leaf(target: Target, url: InternalUrl, context: ResolveContext | 
 				"timeline",
 				signal,
 			);
-			// OMP keeps generated titles in its session index; the journal's own title slot is often empty.
 			const title = route.at.agent === "" && !loaded.meta.title ? ((await readSessionInfo(located.file))?.title ?? null) : null;
 			return text(url.href, renderTimeline(loaded, located.base, located.root, title, filter));
 		}
@@ -319,7 +299,6 @@ async function leaf(target: Target, url: InternalUrl, context: ResolveContext | 
 				"records",
 				signal,
 			);
-			// jq's next page keeps the same input: the types as written, the window as absolute bounds.
 			const keep = [
 				types === null ? "" : `type=${types.source.replaceAll("%", "%25").replaceAll("&", "%26")}`,
 				filter.window === null ? "" : windowQuery(filter.window),
@@ -387,11 +366,9 @@ export class SessionUrlHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		try {
 			const target = targetOf(url);
-			// A type prefix makes the leaf a filtered view; resolve rejects it where no view applies.
 			if (target.pathTypes.length > 0) return null;
 			return await hostFile(target.route, url, context?.cwd);
 		} catch {
-			// Malformed, unknown or ambiguous: resolve reports the full reason.
 			return null;
 		}
 	}
@@ -401,7 +378,6 @@ export class SessionUrlHandler implements ProtocolHandler {
 		checkKeys(url, allowedKeys(target.route));
 		if (target.pathTypes.length > 0 && !takesType(target.route))
 			throw new Error(`session://type/<filter>/ applies to timeline and events.jsonl (and the directories above them), not ${url.href}`);
-		// Parse the filter here too, so a mistyped one fails on the directory a glob starts from.
 		typeFilter(url, target);
 		const entries = await listing(target.route, context?.cwd);
 		if (entries) {

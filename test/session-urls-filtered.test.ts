@@ -1,7 +1,3 @@
-// session-urls filtered reads: loadFiltered builds in full only the entries a
-// filtered timeline or events.jsonl prints, and both render exactly as the fully
-// built session filtered afterwards, including the clock-only window's date and
-// its ambiguity error.
 import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -16,7 +12,6 @@ afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 const NOW = Date.UTC(2026, 10, 3, 12, 0, 0);
 
-/** Local wall time on 2026-11-0<day> as an ISO stamp, so dates hold in any zone. */
 function local(day: number, hour: number, minute: number): string {
 	return new Date(2026, 10, day, hour, minute).toISOString();
 }
@@ -74,7 +69,6 @@ const CASES: readonly (readonly [string | null, string | null, string | null])[]
 	["subresult", null, null],
 ];
 
-/** The fully built session with the filter applied afterwards, as before pushdown. */
 async function expected(file: string, types: string | null, since: string | null, until: string | null) {
 	const loaded = await loadSession(file, "sid", "");
 	const spec = parseWindow(since, until);

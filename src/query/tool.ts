@@ -1,9 +1,3 @@
-// The session_query tool: this machine's omp sessions as relations for eval
-// cells, which call it as `tool.session_query({...})` and read `.details`.
-// `sessions`, `agents` and `events` return rows from the TypeScript loaders;
-// `sql` and `export` run DuckDB on the calling session's database
-// (database.ts) with this call's relations in schema `src` (sources.ts). The
-// request is parsed once here into a discriminated union.
 import { readFileSync } from "node:fs";
 import { type ExtensionContext, type ToolDefinition, z } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n.ts";
@@ -19,7 +13,6 @@ export const TOOL = "session_query";
 
 const MAX_SESSIONS = 50;
 
-/** The operations this tool serves; `action` selects the request shape. */
 const ACTIONS = ["sessions", "agents", "events", "sql", "export"] as const;
 
 const sid = z.string().min(1).describe("session id or unique id prefix");
@@ -49,14 +42,11 @@ const from = z
 		"`sql` and `export`: the sessions whose relations become schema `src`, read again on every call; omitted: no session relations",
 	);
 
-/** The rows `tables` JSON text carries, once decoded. */
 const tablesValue = z
 	.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/), z.array(z.record(z.string(), z.unknown())).min(1))
 	.optional();
-/** The bindings `params` JSON text carries, once decoded. */
 const paramsValue = z.union([z.array(scalar), z.record(z.string(), scalar)]).optional();
 
-/** What the model sees: one object, `action` selecting which other fields apply. */
 const parameters = z.object({
 	action: z
 		.enum(ACTIONS)
@@ -137,7 +127,6 @@ const exportRequest = z
 	.object({ action: z.literal("export"), query, path, format, from, tables: tablesValue, params: paramsValue })
 	.strict();
 
-/** One request shape per `action`, what `parseRequest` hands the rest of this file. */
 const requests = {
 	sessions: sessionsRequest,
 	agents: agentsRequest,
@@ -153,7 +142,6 @@ type Request =
 	| z.infer<typeof exportRequest>;
 type Details = Record<string, unknown>;
 
-/** Field-first text for a zod failure, e.g. `query: must be removed`; the path names the field. */
 function issues(error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] }): string {
 	return error.issues
 		.map((issue) => {
@@ -163,7 +151,6 @@ function issues(error: { issues: readonly { path: readonly PropertyKey[]; messag
 		.join("; ");
 }
 
-/** The value a `params` or `tables` argument carries; text that is not JSON fails naming the field. */
 function jsonText(value: string | undefined, name: string): unknown {
 	if (value === undefined) return undefined;
 	try {
@@ -173,17 +160,9 @@ function jsonText(value: string | undefined, name: string): unknown {
 	}
 }
 
-/**
- * The one entry both `approval` and `execute` use: parse the flat `parameters`
- * object, decode its JSON text, then admit the result as the request shape its
- * `action` names. Fields that belong to another action and missing required
- * fields fail here, naming the field.
- */
 function parseRequest(raw: unknown): Request {
 	const flat = parameters.safeParse(raw);
 	if (!flat.success) throw new Error(issues(flat.error));
-	// The flat parse keeps every declared key, absent ones as `undefined`; a
-	// branch admits only the fields it declares, so drop those and decode first.
 	const decoded = Object.fromEntries(
 		Object.entries({
 			...flat.data,
@@ -297,17 +276,8 @@ async function run(
 	}
 }
 
-/** The most JSON text a direct call shows. */
 const SUMMARY_CHARS = 8192;
 
-/**
- * `JSON.stringify(value)` when it is at most `budget` chars, else null.
- * Serialization stops once the text passes the budget, so a large result is
- * never serialized whole; a string longer than what is left is not escaped.
- * The value is JSON data — strings, numbers, booleans, null, arrays, plain
- * objects, Dates — which is what `Details` holds; boxed primitives and a
- * `toJSON` returning undefined would not match `JSON.stringify` here.
- */
 export function jsonWithin(value: unknown, budget: number): string | null {
 	const parts: string[] = [];
 	let length = 0;
@@ -337,7 +307,6 @@ export function jsonWithin(value: unknown, budget: number): string | null {
 	return write(value) ? parts.join("") : null;
 }
 
-/** The text a direct (non-eval) call shows; eval cells read `details`. */
 function summary(request: Request, details: Details): string {
 	return (
 		jsonWithin(details, SUMMARY_CHARS) ??
@@ -345,7 +314,6 @@ function summary(request: Request, details: Details): string {
 	);
 }
 
-/** Writing a file needs write approval; every other action only reads session files. */
 function approval(args: unknown): "read" | "write" {
 	let request: Request;
 	try {
@@ -368,7 +336,6 @@ function approval(args: unknown): "read" | "write" {
 	}
 }
 
-/** Query failures are expected (bad SQL, unknown session) and come back as tool errors, not log warnings. */
 export function sessionQueryTool(
 	databases: SessionDatabases,
 ): ToolDefinition<typeof parameters> & { docTopics(): Readonly<Record<string, string>> } {

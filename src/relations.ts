@@ -1,8 +1,3 @@
-// Session history as relations, shared by the session:// metadata views and the
-// session_query tool: session metadata rows (with the find filter), the
-// transcript tree of one session, and the event records of one transcript.
-// Every row comes from the typed listings and loaders the timeline uses; no
-// rendered text is parsed back.
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type LoadedSession, loadSession } from "./events.ts";
@@ -11,10 +6,8 @@ import { getSessionsDir, latestRecaps, listSessions, promptMatches, type Session
 import { eventRecords } from "./render.ts";
 import { childAgents, childDir, type SessionRef } from "./routes.ts";
 
-/** Listing size that means "every session". */
 export const ALL_SESSIONS = 1_000_000;
 
-/** One session's metadata, as `sessions.jsonl` lists it. */
 export interface SessionRow {
 	readonly sid: string;
 	readonly url: string;
@@ -28,11 +21,9 @@ export interface SessionRow {
 	readonly assistantTurns: number | null;
 	readonly size: number;
 	readonly recap: string | null;
-	/** The header's `parentSession` as written: a file path for forks and task children, a session id for continuations. */
 	readonly parent: string | null;
 }
 
-/** A session's listed title: OMP's, else its first prompt's first line, as OMP's own listing names untitled sessions. */
 function titleOf(info: SessionInfo): string {
 	return info.title ?? (info.firstMessage.split("\n", 1)[0] ?? "").slice(0, 200);
 }
@@ -56,7 +47,6 @@ export function metadata(infos: readonly SessionInfo[]): SessionRow[] {
 	}));
 }
 
-/** Sessions directory a `project` selector names: `.` the caller's project, a bucket name, or a path; null for every project. */
 export function projectDir(project: string | null, cwd: string | undefined): string | undefined {
 	if (project === null) return undefined;
 	if (project === ".") {
@@ -66,11 +56,6 @@ export function projectDir(project: string | null, cwd: string | undefined): str
 	return project.includes("/") ? sessionDirForCwd(path.resolve(cwd ?? "/", project)) : path.join(getSessionsDir(), project);
 }
 
-/**
- * Sessions whose typed prompts (prompt-history FTS), title or recap match every
- * word of `needle`; recaps are looked up only for sessions neither of the
- * others already matches.
- */
 function matchText(infos: readonly SessionInfo[], needle: string): SessionInfo[] {
 	const fromPrompts = new Set(promptMatches(needle, 500));
 	const words = needle.toLowerCase().split(/\s+/);
@@ -90,18 +75,12 @@ function matchText(infos: readonly SessionInfo[], needle: string): SessionInfo[]
 export interface SessionQuery {
 	readonly project: string | null;
 	readonly text: string | null;
-	/** Inclusive lower and exclusive upper bound on `modified`, epoch milliseconds. */
 	readonly since: number | null;
 	readonly until: number | null;
 	readonly limit: number;
 }
 
-/**
- * Session rows, newest first: every filter applies before `limit` cuts the
- * result, and only the rows kept get their metadata built.
- */
 export async function sessionRows(query: SessionQuery, cwd: string | undefined): Promise<SessionRow[]> {
-	// Unfiltered, the listing itself stops at `limit`: it returns the newest non-empty sessions in order.
 	const unfiltered = query.since === null && query.until === null && query.text === null;
 	const infos = (await listSessions(projectDir(query.project, cwd), unfiltered ? query.limit : ALL_SESSIONS)).filter((info) => {
 		const modified = info.modified.getTime();
@@ -110,24 +89,20 @@ export async function sessionRows(query: SessionQuery, cwd: string | undefined):
 	return metadata((query.text === null ? infos : matchText(infos, query.text)).slice(0, query.limit));
 }
 
-/** One transcript of a session: the root (`agent` "") or a subagent. */
 export interface TranscriptRow {
 	readonly sid: string;
 	readonly agent: string;
-	/** Allocated id of the transcript this subagent ran under ("" for the root); null for the root itself. */
 	readonly parent: string | null;
 	readonly file: string;
 	readonly bytes: number;
 	readonly modified: string;
 }
 
-/** The transcript row of `file`, with its size and modification time now. */
 export async function transcriptRow(sid: string, agent: string, parent: string | null, file: string): Promise<TranscriptRow> {
 	const stat = await fs.stat(file);
 	return { sid, agent, parent, file, bytes: stat.size, modified: stat.mtime.toISOString() };
 }
 
-/** The root transcript and every subagent below it, parents before children; the subagents session://<id>/agents/ lists. */
 export async function transcriptTree(ref: SessionRef): Promise<TranscriptRow[]> {
 	const rows: TranscriptRow[] = [await transcriptRow(ref.sid, "", null, ref.file)];
 	for (let index = 0; index < rows.length; index++) {
@@ -139,14 +114,12 @@ export async function transcriptTree(ref: SessionRef): Promise<TranscriptRow[]> 
 	return rows;
 }
 
-/** Canonical session:// URL of a transcript. */
 export function transcriptUrl(sid: string, agent: string): string {
 	return agent === "" ? `session://${sid}` : `session://${sid}/agents/${agent}`;
 }
 
 export type EventRecord = Record<string, unknown>;
 
-/** A transcript's active-branch events that `filter` shows, as the records events.jsonl serves. */
 export async function transcriptEvents(
 	transcript: TranscriptRow,
 	filter: EventFilter,

@@ -1,15 +1,3 @@
-// Session JSONL → normalized timeline events, in two streaming passes.
-// The index pass projects every record with SKELETON (ids, roles, tool names,
-// timestamps; texts measured, never captured): it picks the active branch by
-// OMP's own leaf replay, numbers its turns, and completes tool calls from
-// their results and tool_execution_start records wherever they sit in the
-// file. The build pass then projects only the branch entries a caller asks
-// for, with TIMELINE (speech and tool arguments kept) or LIGHT (structure and
-// measures only), into events. Tool output is measured in the index pass; only
-// wait/task/fork_task results and async-result messages, whose `<task-result>`
-// blocks become deduplicated subagent results, are captured. Every text has
-// its artifact://, agent://, history:// and local:// references rewritten to
-// the owning session so a reader never resolves them against its own session.
 import { activeLeaf, type LeafNode } from "./omp-adapter.ts";
 import {
 	Clipped,
@@ -34,10 +22,6 @@ const ID = scalar(512);
 const FLAG = scalar(0);
 const DETAIL_CAP = 2 << 20;
 
-/**
- * The build projection of one entry: `speech` caps every free text, `arg` the
- * bash/python sources, `summary` compaction summaries, `args` a toolCall's arguments.
- */
 function entryPolicy(speech: number, arg: number, summary: number, args: Policy): Policy {
 	const details = keys({ from: ID, to: ID, message: scalar(speech), body: scalar(speech), pool: ID });
 	const block = keys({
@@ -96,15 +80,7 @@ function entryPolicy(speech: number, arg: number, summary: number, args: Policy)
 	});
 }
 
-/** Everything an event shows. */
 const TIMELINE = entryPolicy(SPEECH, ARG, 400, keepAll(ARG, 500));
-/**
- * A toolCall's arguments in a LIGHT build: the `path`/`i` an event kind reads for
- * identity, plus the argument fields `callEvent` derives an event from — an
- * irc_out's body, a dispatch's context and its children — measured (length and
- * line count, no captured text), with each child's `name` and `agent` kept exact
- * as TIMELINE keeps them.
- */
 const LIGHT_ARGS = keys({
 	path: ID,
 	i: ID,
@@ -115,19 +91,8 @@ const LIGHT_ARGS = keys({
 	agent: scalar(ARG),
 	tasks: each(keys({ name: scalar(ARG), agent: scalar(ARG), task: scalar(0) }), 500),
 });
-/**
- * An event's structure and measures without its texts: the same kinds, blocks,
- * tools, call status, intent, marker names and turn as TIMELINE, every free text
- * measured only, and the arguments an event's text, context and children come
- * from present as measurements.
- */
 const LIGHT = entryPolicy(0, 0, 0, LIGHT_ARGS);
 const MEASURED_BLOCK = keys({ type: ID, text: FLAG });
-/**
- * What the index pass reads of every record: tree links, header and title,
- * the role and attribution that open a turn, a tool result's call, error flag
- * and measured content, a tool start's timing and intent.
- */
 const SKELETON: Policy = keys({
 	type: ID,
 	id: ID,
@@ -151,7 +116,6 @@ const SKELETON: Policy = keys({
 	}),
 });
 
-/** A tool call completed from its result and start records. */
 export interface Call {
 	readonly id: string;
 	readonly tool: string;
@@ -216,7 +180,6 @@ export interface LoadedSession {
 	readonly events: readonly SessionEvent[];
 }
 
-/** An item awaiting call completion; `turn` comes from the index pass. */
 type Item =
 	| { readonly kind: "user"; readonly block: number | null; readonly text: Text; readonly injected: boolean }
 	| { readonly kind: "developer" | "thinking" | "say"; readonly block: number | null; readonly text: Text }
@@ -233,12 +196,6 @@ type Item =
 	| { readonly kind: "exec"; readonly lang: "bash" | "python"; readonly source: Text; readonly status: string }
 	| { readonly kind: "marker"; readonly what: string; readonly detail: string };
 
-/**
- * What an entry can yield: `none` never yields items (a tool result of an
- * ordinary tool, a custom entry other than session_exit), `subresults` may
- * carry `<task-result>` blocks (wait/task/fork_task results, async-result
- * messages), `items` everything else.
- */
 type Yield = "none" | "subresults" | "items";
 
 interface IndexNode extends LeafNode {
@@ -246,16 +203,13 @@ interface IndexNode extends LeafNode {
 	readonly line: number;
 	readonly t: string;
 	readonly yields: Yield;
-	/** The entry is a prompt that starts a new turn. */
 	readonly opensTurn: boolean;
 }
 
-/** One active-branch entry, as the index pass sees it. */
 export interface BranchEntry {
 	readonly entry: string;
 	readonly line: number;
 	readonly t: string;
-	/** The turn its events belong to (0: before the first prompt). */
 	readonly turn: number;
 }
 
@@ -263,24 +217,12 @@ interface BranchNode extends BranchEntry {
 	readonly yields: Yield;
 }
 
-/** The index pass over one session file: metadata, the active branch root first, and completed-call facts. */
 export interface SessionIndex {
 	readonly meta: SessionMeta;
 	readonly branch: readonly BranchNode[];
 	readonly collector: Collector;
 }
 
-/**
- * How the build pass projects one branch entry: `full` builds its events as
- * loadSession returns them; `light` builds the same events with what a filter or
- * a length-based caller reads kept exact (kind, entry, block, t, line, turn, a
- * call's id, tool and completed-call facts, IRC ends, marker names, exec status,
- * prompt attribution, a dispatch's children count, each child's name and agent),
- * and every free text measured only (length and line count, not content):
- * an irc_out's body, a dispatch's context and its children's tasks carry the
- * same measures as `full`, while the text itself is not captured. `skip` builds
- * none.
- */
 export type Build = "full" | "light" | "skip";
 
 interface ResultInfo {
@@ -308,7 +250,6 @@ function obj(value: Projected | undefined): ProjectedObject | null {
 	return value !== null && typeof value === "object" && !Array.isArray(value) && !(value instanceof Clipped) ? value : null;
 }
 
-/** Joins a string-or-blocks content field's text blocks; images become `[image]`. */
 function contentText(value: Projected | undefined): Text | null {
 	const direct = text(value);
 	if (direct !== null) return direct;
@@ -340,12 +281,6 @@ function textChars(value: Text): number {
 	return value instanceof Clipped ? value.chars : value.length;
 }
 
-/**
- * `textChars(contentText(content))` of a TIMELINE projection, computed from
- * the measured SKELETON projection: joined with `\n` and `[image]` parts while
- * no block passes the speech cap, else the sum of the block texts' lengths
- * (contentText's Clipped form).
- */
 function contentChars(value: Projected | undefined): number {
 	const direct = text(value);
 	if (direct !== null) return textChars(direct);
@@ -373,14 +308,12 @@ function contentChars(value: Projected | undefined): number {
 
 const TAG_ONLY = /^<\/?[\w:.-]+(?:\s[^>]*)?>$/;
 
-/** First line carrying content (bare wrapper tags such as `<system-notice>` skipped), cut to `max`. */
 function firstLine(value: Text | null, max = 160): string {
 	const lines = (value instanceof Clipped ? value.text : (value ?? "")).split("\n");
 	const flat = lines.map((line) => line.trim()).find((line) => line !== "" && !TAG_ONLY.test(line)) ?? "";
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-/** Rewrites references to the owning session's resources into session:// URLs. */
 export function rewriteRefs(value: Text, sid: string): Text {
 	const rewrite = (input: string): string =>
 		input
@@ -406,7 +339,6 @@ function taskResults(body: Text): Item[] {
 	return items;
 }
 
-/** Items of a custom (non-tool) message, from either a custom_message entry or a custom-role message. */
 function customItems(customType: string, fields: ProjectedObject, agent: string): Item[] {
 	const details = obj(fields.details);
 	const body = contentText(fields.content);
@@ -433,7 +365,6 @@ interface Collector {
 	readonly starts: Map<string, { readonly intent: string | null; readonly startedAt: string | null }>;
 }
 
-/** Items of one `message` entry. */
 function messageItems(message: ProjectedObject, entry: string, agent: string): Item[] {
 	const role = str(message.role);
 	switch (role) {
@@ -472,7 +403,6 @@ function messageItems(message: ProjectedObject, entry: string, agent: string): I
 			return items;
 		}
 		case "toolResult": {
-			// Only the subagent tools deliver `<task-result>` blocks; elsewhere the text is tool output (measured by the index pass).
 			const body = contentText(message.content);
 			return body !== null && SUBAGENT_RESULT_TOOLS[str(message.toolName) ?? ""] === true ? taskResults(body) : [];
 		}
@@ -499,7 +429,6 @@ function messageItems(message: ProjectedObject, entry: string, agent: string): I
 	}
 }
 
-/** Items of one non-header entry. */
 function entryItems(record: ProjectedObject, entry: string, agent: string): Item[] {
 	const type = str(record.type);
 	switch (type) {
@@ -540,7 +469,6 @@ function entryItems(record: ProjectedObject, entry: string, agent: string): Item
 	}
 }
 
-/** What `entryItems` can yield for a record, judged from its SKELETON projection. */
 function entryYields(record: ProjectedObject): Yield {
 	switch (str(record.type)) {
 		case "message": {
@@ -560,7 +488,6 @@ function entryYields(record: ProjectedObject): Yield {
 	}
 }
 
-/** Records a tool result or tool start of a SKELETON projection into `collector`; results and starts anywhere in the file count. */
 function collect(record: ProjectedObject, entry: string, t: string, collector: Collector): void {
 	const type = str(record.type);
 	if (type === "message") {
@@ -581,7 +508,6 @@ function parseTime(value: string | null): number | null {
 	return Number.isNaN(time) ? null : time;
 }
 
-/** The completed call for `item` (status, result entry, intent, duration). */
 function completeCall(item: Extract<Item, { kind: "call" }>, t: string, collector: Collector): Call {
 	const result = collector.results.get(item.id);
 	const start = collector.starts.get(item.id);
@@ -600,7 +526,6 @@ function completeCall(item: Extract<Item, { kind: "call" }>, t: string, collecto
 	};
 }
 
-/** Turns a completed call into its event kind: outgoing IRC, dispatch, or a plain call. */
 function callEvent(base: Base, call: Call): SessionEvent {
 	const args = obj(call.args);
 	if (call.tool === "write") {
@@ -653,12 +578,6 @@ function rewriteEvent(event: SessionEvent, sid: string): SessionEvent {
 	}
 }
 
-/**
- * The index pass over one session file (`agent` = "" for the root session,
- * else the subagent id; `sid` is the root session's full id): metadata, the
- * active branch root→leaf with each entry's turn, and the results and tool
- * starts of the whole file. No text is captured.
- */
 export async function indexSession(file: string, sid: string, agent: string, signal?: AbortSignal): Promise<SessionIndex> {
 	const nodes: IndexNode[] = [];
 	const collector: Collector = { results: new Map(), starts: new Map() };
@@ -683,7 +602,6 @@ export async function indexSession(file: string, sid: string, agent: string, sig
 				return;
 			}
 			if (type === "title_change") state.title = str(fields.title) ?? state.title;
-			// v1 journals carry no ids; OMP's migration links them linearly, so do the same with stable line ids.
 			const version = state.header?.version;
 			const legacy = typeof version !== "number" || version < 2;
 			const id = (!legacy && str(fields.id)) || `legacy-${record.line}`;
@@ -691,10 +609,8 @@ export async function indexSession(file: string, sid: string, agent: string, sig
 			state.previous = id;
 			const t = str(fields.timestamp) ?? "";
 			const activeLeafId = fields.activeLeafId === null ? null : (str(fields.activeLeafId) ?? undefined);
-			// A prompt is a user message whose content contentText reads (a string or blocks).
 			const message = type === "message" ? obj(fields.message) : null;
 			const prompt = message !== null && str(message.role) === "user" && (text(message.content) !== null || Array.isArray(message.content));
-			// A subagent's first prompt comes from its parent with agent attribution, so every prompt there opens a turn.
 			const opensTurn = prompt && (str(message.attribution) !== "agent" || agent !== "");
 			nodes.push({ id, parentId, activeLeafId, line: record.line, t, yields: entryYields(fields), opensTurn });
 			collect(fields, id, t, collector);
@@ -740,19 +656,12 @@ export async function indexSession(file: string, sid: string, agent: string, sig
 	};
 }
 
-/** A branch entry the build pass projects: its policy and whether its events are returned. */
 interface Planned {
 	readonly node: BranchNode;
 	readonly policy: Policy;
 	readonly emit: boolean;
 }
 
-/**
- * The build pass: events of the branch entries `build` asks for, in branch
- * order, projected as it says. Entries that yield nothing are never read;
- * entries that may carry subagent results are always built in full so
- * duplicates are dropped exactly as over the whole branch.
- */
 export async function buildEvents(
 	index: SessionIndex,
 	build: (entry: BranchEntry) => Build,
@@ -835,10 +744,6 @@ export async function buildEvents(
 	return events;
 }
 
-/**
- * Loads one session file (`agent` = "" for the root session, else the subagent id)
- * as its active-branch timeline. `sid` is the root session's full id.
- */
 export async function loadSession(file: string, sid: string, agent: string, signal?: AbortSignal): Promise<LoadedSession> {
 	const index = await indexSession(file, sid, agent, signal);
 	return { meta: index.meta, events: await buildEvents(index, () => "full", signal) };
@@ -863,16 +768,10 @@ export type EntrySelector = { readonly kind: "id"; readonly id: string } | { rea
 export interface EntryDetail {
 	readonly line: number;
 	readonly record: Projected;
-	/** For a tool result: the assistant's toolCall block and the tool_execution_start record. */
 	readonly call: Projected | null;
 	readonly start: Projected | null;
 }
 
-/**
- * Finds one entry anywhere in the file (any branch) and projects it in detail.
- * Pass one indexes lines; pass two builds only the target line and, for a tool
- * result, its toolCall and start lines. Null when absent.
- */
 export async function loadEntry(file: string, selector: EntrySelector, signal?: AbortSignal): Promise<EntryDetail | null> {
 	const callLines = new Map<string, number>();
 	const startLines = new Map<string, number>();

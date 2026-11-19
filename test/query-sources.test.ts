@@ -1,15 +1,9 @@
-// Schema `src` exists only for what a call's SQL reaches: the `src.<name>` its
-// parse tree names, the definitions of the views and macros the database keeps,
-// and every relation when that tree names none (a table function, a `SHOW`, a
-// statement DuckDB cannot serialize, a parse error). `data` in `src.events`
-// holds the record without the field its text column already carries.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type DuckDBConnection, DuckDBInstance } from "@duckdb/node-api";
 import { runSql } from "../src/query/run.ts";
 import { eventRow, referencedRelations } from "../src/query/sources.ts";
 import type { EventRecord, TranscriptRow } from "../src/relations.ts";
 
-/** The answer of one `referencedRelations` call, flattened for comparison. */
 function flatten(referenced: "all" | ReadonlySet<string>): string[] {
 	return referenced === "all" ? ["all"] : [...referenced].sort();
 }
@@ -89,7 +83,6 @@ const transcript: TranscriptRow = {
 	modified: "2026-01-01T00:00:00.000Z",
 };
 
-/** The cells `data` and `text` of one event row. */
 function row(record: EventRecord): { text: unknown; data: unknown } {
 	const cells = eventRow(transcript, 0, record);
 	return { text: cells[13], data: cells[14] };

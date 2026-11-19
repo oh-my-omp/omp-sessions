@@ -1,55 +1,17 @@
-// Schema `src`: the relations one session_query call reads, built at the start
-// of the call and dropped at its end, so nothing in it outlives the call.
-// For the sessions a call names, only the relations its SQL reaches exist:
-//   src.files        each transcript file (root and subagents) with its sid and agent id
-//   src.entries      a view reading those JSONL files in place at query time, one row per line
-//   src.sessions     session metadata (the session:// listing rows)
-//   src.transcripts  each transcript's tree position and branch counts
-//   src.events       the active-branch events of every transcript (the events.jsonl records)
-// The semantic relations come from this package's TypeScript loaders on each call; the
-// view reads the authoritative files directly. Rows passed in `tables` become src.<name>.
 import type { DuckDBAppender, DuckDBConnection } from "@duckdb/node-api";
 import { readSessionInfo } from "../omp-adapter.ts";
 import { type EventRecord, metadata, type TranscriptRow, transcriptEvents, transcriptTree, transcriptUrl } from "../relations.ts";
 import { locateSession, type SessionRef } from "../routes.ts";
 import { identifier, literal } from "./database.ts";
 
-/** Names the semantic and raw relations take in schema `src`; caller tables cannot reuse them. */
 export const SOURCE_RELATIONS: readonly string[] = ["files", "entries", "sessions", "transcripts", "events"];
 
-/**
- * Words that let a stored view or macro reach `src` without naming one relation:
- * `src` itself, the catalog views and functions that list relations (`duckdb_*`,
- * `pg_*`, `sqlite_*`, `information_schema`, `SHOW`, `DESCRIBE`, `SUMMARIZE`), and
- * the table functions that take a relation name at run time (`query`,
- * `query_table`, `pragma_*`). A definition holding any of them builds every
- * relation: its `CREATE VIEW` text is not a SELECT `json_serialize_sql` accepts.
- */
 const DEFINITION_REACHES_SRC =
 	/\b(?:src|query|query_table|pragma_\w+|duckdb_\w+|pg_\w+|sqlite_\w+|information_schema|show|describe|summarize)\b/i;
 
-/**
- * A relation the catalog owns: its rows list or describe the relations in `src`
- * (`information_schema.tables`, `pg_catalog.pg_class`, `sqlite_master`,
- * `duckdb_*` views), so a query that reads one builds every relation and its
- * rows match what a fully built `src` shows.
- */
 const CATALOG_SCHEMA = /^(?:information_schema|pg_catalog)$/i;
 const CATALOG_RELATION = /^(?:duckdb|pg|sqlite)_\w+$/i;
 
-/**
- * The `src` relations one query's parse tree names, or `all` when that tree does
- * not name them: a statement DuckDB cannot serialize to a tree (anything but a
- * SELECT, so a CTAS included), a parse error, a reference resolved at run time
- * (a table function or a `SHOW`, whose relation names the tree lacks), or a
- * catalog relation (whose rows list the relations in `src`).
- *
- * The tree is DuckDB's own parse (`json_serialize_sql`), so quoted, commented,
- * spaced, catalog-qualified, CTE and subquery references arrive as the
- * `schema_name`/`table_name` they denote; the walk covers every node rather than
- * recognized shapes. A parse error is not reported from here: `runSql` reports
- * the query's own error.
- */
 async function parseReferences(connection: DuckDBConnection, sql: string): Promise<"all" | Set<string>> {
 	let parsed: unknown;
 	try {
@@ -85,9 +47,7 @@ async function parseReferences(connection: DuckDBConnection, sql: string): Promi
 }
 
 /**
- * What one call's `src` must hold: `all` when the SQL's parse tree cannot name
- * its relations exactly, or when a stored view or macro definition can reach
- * `src`; else the relations the SQL names. Building a relation nobody reads only
+ * Building a relation nobody reads only
  * costs allocations; missing one the query reads fails it, so an uncertain
  * answer is `all`.
  */
@@ -100,11 +60,6 @@ export async function referencedRelations(
 	return parseReferences(connection, sql);
 }
 
-/**
- * The SQL of every non-internal view and macro this database holds, in every
- * schema including `temp`: an object the caller kept across calls can reach
- * `src` without the call's own text naming it.
- */
 async function definitionTexts(connection: DuckDBConnection): Promise<string[]> {
 	const definitions = await connection.run(
 		"SELECT sql FROM duckdb_views() WHERE NOT internal AND sql IS NOT NULL UNION ALL SELECT macro_definition FROM duckdb_functions() WHERE NOT internal AND macro_definition IS NOT NULL",
@@ -114,18 +69,8 @@ async function definitionTexts(connection: DuckDBConnection): Promise<string[]> 
 	return texts;
 }
 
-/**
- * Slack above a file's size for the longest line DuckDB may meet in it: a
- * transcript still being written grows while the call runs.
- */
 const LINE_SLACK_BYTES = 16 << 20;
 
-/**
- * One file's scan for src.entries. DuckDB sizes every read buffer by
- * maximum_object_size, so a single corpus-wide bound (transcripts here hold
- * lines over 200 MB) runs a multi-file scan out of memory; each file is read
- * with a bound from its own size instead.
- */
 function entriesScan(file: TranscriptRow): string {
 	return `SELECT filename AS file, json FROM read_json([${literal(file.file)}], format = 'newline_delimited', records = false, columns = {'json': 'JSON'}, filename = true, maximum_object_size = ${file.bytes + LINE_SLACK_BYTES})`;
 }
@@ -220,13 +165,11 @@ function appendCell(appender: DuckDBAppender, type: ColumnType, value: Cell): vo
 	}
 }
 
-/** One row of `columns` into an open appender. */
 function appendRow(appender: DuckDBAppender, columns: readonly Column[], row: readonly Cell[]): void {
 	for (const [index, column] of columns.entries()) appendCell(appender, column.type, row[index] ?? null);
 	appender.endRow();
 }
 
-/** Creates `src.<name>` and opens its appender; the caller appends and then closes it. */
 async function openTable(connection: DuckDBConnection, name: string, columns: readonly Column[]): Promise<DuckDBAppender> {
 	await connection.run(
 		`CREATE TABLE src.${identifier(name)} (${columns.map((column) => `${identifier(column.name)} ${column.type}`).join(", ")})`,
@@ -258,10 +201,6 @@ function int(record: EventRecord, key: string): number | null {
 	return typeof value === "number" ? value : null;
 }
 
-/**
- * `record` as JSON without the field `eventRow` copied into its text column:
- * `data` carries the rest, so no text lives in the table twice.
- */
 function dataJson(record: EventRecord, copied: string | null): string {
 	if (copied === null) return JSON.stringify(record);
 	return JSON.stringify(record, function (this: unknown, key, value) {
@@ -272,7 +211,6 @@ function dataJson(record: EventRecord, copied: string | null): string {
 export function eventRow(transcript: TranscriptRow, seq: number, record: EventRecord): Cell[] {
 	const text = str(record, "text");
 	const source = str(record, "source");
-	// The text column shows `text`, else `source`; data drops exactly that field.
 	const copied = text !== null ? "text" : source !== null ? "source" : null;
 	return [
 		transcript.sid,
@@ -294,7 +232,6 @@ export function eventRow(transcript: TranscriptRow, seq: number, record: EventRe
 	];
 }
 
-/** Which sessions a call reads: session ids or unique prefixes, with or without their subagents. */
 export interface SessionSelection {
 	readonly sids: readonly string[];
 	readonly agents: boolean;
@@ -309,14 +246,6 @@ async function locate(sids: readonly string[], cwd: string): Promise<SessionRef[
 	return refs;
 }
 
-/**
- * Builds the relations `needed` names for `selection`'s sessions. Tables and
- * their appenders open before the load loop and take each row as it is
- * produced, so events land one at a time instead of in one Cell[][] per call.
- * `src.sessions` costs readSessionInfo; `src.transcripts`/`src.events` cost one
- * transcriptEvents per transcript, serving both; nothing loads a session when
- * neither is named.
- */
 async function sessionRelations(
 	connection: DuckDBConnection,
 	selection: SessionSelection,
@@ -326,7 +255,6 @@ async function sessionRelations(
 ): Promise<void> {
 	if (needed.size === 0) return;
 	const refs = await locate(selection.sids, cwd);
-	// The entries view reads the file list it embeds, so it implies files.
 	const wantsFiles = needed.has("files") || needed.has("entries");
 	const wantsTree = wantsFiles || needed.has("transcripts") || needed.has("events");
 
@@ -400,7 +328,6 @@ async function sessionRelations(
 	}
 }
 
-/** The ColumnType one caller value wants: null and undefined vote for nothing. */
 function valueType(value: unknown): ColumnType | null {
 	if (value === null || value === undefined) return null;
 	if (typeof value === "boolean") return "BOOLEAN";
@@ -411,7 +338,6 @@ function valueType(value: unknown): ColumnType | null {
 	return typeof value === "string" ? "VARCHAR" : "JSON";
 }
 
-/** Column type for a caller column so far: the type a whole-column pass would pick. */
 function mergeType(type: ColumnType | null, value: unknown): ColumnType | null {
 	const wanted = valueType(value);
 	if (wanted === null || type === null) return type ?? wanted;
@@ -437,7 +363,6 @@ async function callerTable(connection: DuckDBConnection, name: string, rows: rea
 	await createTable(connection, name, columns, cells());
 }
 
-/** Builds schema `src` for one call: only the relations `sql` (and persisted main objects) reference. */
 export async function buildSources(
 	connection: DuckDBConnection,
 	selection: SessionSelection | null,
@@ -459,7 +384,6 @@ export async function buildSources(
 	}
 }
 
-/** Drops schema `src` and everything the call put in it. */
 export async function dropSources(connection: DuckDBConnection): Promise<void> {
 	await connection.run("DROP SCHEMA IF EXISTS src CASCADE");
 }

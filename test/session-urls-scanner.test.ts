@@ -1,7 +1,3 @@
-// Differential tests for src/scanner.ts: the streaming
-// projection of every JSONL line must equal JSON.parse followed by the same
-// projection, under every chunking, and malformed/incomplete lines must be
-// reported by line number instead of disappearing.
 import { describe, expect, test } from "bun:test";
 import {
 	Clipped,
@@ -16,7 +12,6 @@ import {
 	scanChunks,
 } from "../src/scanner.ts";
 
-/** Independent oracle: project an already-parsed value with `policy`. */
 function project(value: unknown, policy: Policy): Projected | undefined {
 	if (policy.kind === "skip") return undefined;
 	if (typeof value === "string") {
@@ -47,7 +42,6 @@ function project(value: unknown, policy: Policy): Projected | undefined {
 	throw new Error(`unexpected value ${String(value)}`);
 }
 
-/** Plain-data form for structural comparison (class instances and null prototypes normalized). */
 function plain(value: Projected): unknown {
 	if (value instanceof Clipped) return { clipped: [value.text, value.chars, value.lines] };
 	if (Array.isArray(value)) return value.map(plain);
@@ -90,7 +84,6 @@ function oracle(text: string, root: (line: number) => Policy): Outcome {
 	return { records, invalid, incomplete };
 }
 
-/** `bytes` in `size`-byte chunks of one reused buffer, refilled with junk first, as fileChunks reuses its buffer. */
 function* reusedChunks(bytes: Uint8Array, size: number): Generator<Uint8Array> {
 	const buffer = new Uint8Array(size);
 	for (let offset = 0; offset < bytes.length; offset += size) {
@@ -171,7 +164,6 @@ describe("session-urls scanner", () => {
 		const text = `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`;
 		await expectSame(text, () => sessionPolicy);
 		await expectSame(text, () => everything);
-		// \u escapes, a split surrogate pair, an escaped newline, exponent forms and a raw BOM opening a string, by hand.
 		const handWritten =
 			'{"type":"x","id":"h\\u00e9","message":{"role":"user","content":"\\ud83d\\ude00 a\\u000ab"}}\n{"type":"bom","title":"\uFEFF{x}","n":[1E5,-0,2.5e-3]}\n';
 		await expectSame(handWritten, () => sessionPolicy);
@@ -317,9 +309,6 @@ describe("session-urls scanner", () => {
 			"--1",
 			"1..2",
 			"12a",
-			// "-" must come right after "12a": a stale byte left in the
-			// literal buffer must not make it parse (regression: reads past
-			// `end` would see the '2' from "12a").
 			"-",
 		];
 		const text = [...goods, ...bads].map((literal) => `{"v":${literal}}`).join("\n");

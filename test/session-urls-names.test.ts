@@ -1,7 +1,3 @@
-// session:// resolution of session files whose names carry no timestamp. Such a
-// file is a session when its header reads with an id and a valid creation time,
-// and its id and date come from that header. A stamped name keeps its own id and
-// date, and wins over a header-named copy of the same id.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -14,7 +10,6 @@ const agent = fs.mkdtempSync(path.join(os.tmpdir(), "omp-sessions-names-"));
 const bucket = path.join(agent, "sessions", "--proj--");
 fs.mkdirSync(bucket, { recursive: true });
 
-/** A session file whose header says `id` and was created at `created`. */
 function session(id: string | undefined, created: string | undefined): string {
 	const record = { type: "session", version: 3, id, timestamp: created, cwd: "/w" };
 	return `${JSON.stringify(record)}\n${JSON.stringify({ type: "message", message: { role: "user", content: "hi" } })}\n`;
@@ -34,7 +29,6 @@ fs.writeFileSync(path.join(bucket, "no-created.jsonl"), session("ddd300", undefi
 fs.writeFileSync(path.join(bucket, "no-id.jsonl"), session(undefined, "2026-11-12T12:00:00.000Z"));
 fs.writeFileSync(path.join(bucket, "notes.txt"), session("eee400", "2026-11-12T12:00:00.000Z"));
 fs.mkdirSync(path.join(bucket, "folder.jsonl"));
-// A bucket the user cannot list; a lookup across buckets skips it.
 const locked = path.join(agent, "sessions", "--locked--");
 fs.mkdirSync(locked);
 fs.writeFileSync(path.join(locked, "hidden.jsonl"), session("ggg700", "2026-11-12T12:00:00.000Z"));

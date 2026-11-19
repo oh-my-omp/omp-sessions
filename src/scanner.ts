@@ -1,15 +1,5 @@
-// Streaming, projecting JSONL scanner for OMP session files.
-// A byte-level JSON tokenizer walks every record without materializing it:
-// a Policy tree decides which values are built, and strings are captured up
-// to a per-position cap while their full UTF-16 length and line count are
-// still measured. Skipped strings are crossed with native indexOf, so a record
-// of hundreds of MB costs one pass over its bytes and no allocation for it.
-// Validation is JSON.parse-equivalent for every built or measured value; inside
-// skipped strings only the record-ending newline is checked (other raw control
-// bytes there are tolerated). Host-free (Bun and node:fs only).
 import { open } from "node:fs/promises";
 
-/** A string longer than its cap: the captured prefix plus the full measure. */
 export class Clipped {
 	constructor(
 		readonly text: string,
@@ -23,20 +13,17 @@ export interface ProjectedObject {
 	[key: string]: Projected;
 }
 
-/** What to build at one value position. `cap` bounds captured string length (0 = measure only). */
 export type Policy =
 	| { readonly kind: "skip" }
 	| { readonly kind: "keep"; readonly cap: number; readonly maxItems: number; readonly child: (key: string | number) => Policy };
 
 export const SKIP: Policy = { kind: "skip" };
 
-/** Keeps a whole subtree: strings capped at `cap`, containers at `maxItems` children. */
 export function keepAll(cap: number, maxItems: number): Policy {
 	const policy: Policy = { kind: "keep", cap, maxItems, child: () => policy };
 	return policy;
 }
 
-/** Keeps the listed keys of an object (strings directly under it capped at `cap`). */
 export function keys(table: Readonly<Record<string, Policy>>): Policy {
 	return {
 		kind: "keep",
@@ -46,17 +33,14 @@ export function keys(table: Readonly<Record<string, Policy>>): Policy {
 	};
 }
 
-/** Keeps an array (or a string measured only) whose every element follows `element`. */
 export function each(element: Policy, maxItems = Number.POSITIVE_INFINITY): Policy {
 	return { kind: "keep", cap: 0, maxItems, child: () => element };
 }
 
-/** Keeps a scalar; a string is captured up to `cap` characters. */
 export function scalar(cap: number): Policy {
 	return { kind: "keep", cap, maxItems: 0, child: () => SKIP };
 }
 
-/** One complete line's top-level value, projected. */
 export interface ScannedRecord {
 	readonly line: number;
 	readonly value: Projected;
@@ -64,14 +48,11 @@ export interface ScannedRecord {
 
 export interface ScanStats {
 	readonly records: number;
-	/** Physical line numbers of complete lines that failed to parse. */
 	readonly invalidLines: readonly number[];
-	/** Line number of an unterminated, incomplete final record (a writer mid-append), if any. */
 	readonly incompleteTail: number | null;
 	readonly bytes: number;
 }
 
-/** An object without a prototype, so a `__proto__` key is an ordinary own key, as in JSON.parse. */
 function newObject(): ProjectedObject {
 	return Object.create(null) as ProjectedObject; // null-prototype record: no runtime check exists for "has no inherited keys"
 }
@@ -115,14 +96,11 @@ const SIMPLE_ESCAPES: Readonly<Record<number, string>> = {
 const DECODE_FLUSH_BYTES = 64 * 1024;
 const MAX_LITERAL = 512;
 const KEY_POLICY: Policy = scalar(Number.POSITIVE_INFINITY);
-/** Measures a skipped object's keys: same raw-byte and escape validation as capture, no value built. */
 const SKIP_KEY_POLICY: Policy = scalar(0);
 
-/** Shared stack entries for skipped containers: their mutable fields are never read. */
 const SKIP_ARRAY_FRAME: Frame = Object.freeze({ array: true, policy: SKIP, target: null, key: "", count: 0 });
 const SKIP_OBJECT_FRAME: Frame = Object.freeze({ array: false, policy: SKIP, target: null, key: "", count: 0 });
 
-/** `-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?` over literal bytes; literals are ASCII, digits match only ASCII. */
 function isNumberLiteral(buf: Uint8Array, end: number): boolean {
 	const digit = (index: number): boolean => index < end && buf[index] !== undefined && buf[index] >= 0x30 && buf[index] <= 0x39;
 	const digits = (index: number): number => {
@@ -157,10 +135,6 @@ function literalIs(buf: Uint8Array, end: number, word: string): boolean {
 
 class ParseError extends Error {}
 
-/**
- * Incremental tokenizer. Feed chunks with `push`, finish with `end`.
- * Each complete line that parses yields one record (its top-level value projected).
- */
 class JsonlScanner {
 	readonly #root: (line: number) => Policy;
 	readonly #emit: (record: ScannedRecord) => void;
@@ -181,9 +155,7 @@ class JsonlScanner {
 	#stringNewlines = 0;
 	readonly #stringParts: string[] = [];
 	#stringStored = 0;
-	// ignoreBOM keeps a leading U+FEFF: it is string content here, not a stream marker.
 	readonly #decoder = new TextDecoder("utf-8", { ignoreBOM: true });
-	/** `#decoder` while a captured string is open. */
 	#stringDecoder: TextDecoder | null = null;
 	readonly #stringPending: Uint8Array[] = [];
 	#stringPendingBytes = 0;
@@ -192,7 +164,6 @@ class JsonlScanner {
 	readonly #literalBuf = new Uint8Array(MAX_LITERAL);
 	#literalLen = 0;
 	#literalPolicy: Policy = SKIP;
-	/** Per chunk: next index of `"`, `\` and newline at or after the last lookup (-1 none left, -2 unknown). */
 	readonly #next: [number, number, number] = [-2, -2, -2];
 
 	constructor(root: (line: number) => Policy, emit: (record: ScannedRecord) => void) {
@@ -224,7 +195,6 @@ class JsonlScanner {
 			} catch (error) {
 				if (!(error instanceof ParseError)) throw error;
 				this.#fail();
-				// Leave a newline unconsumed so skipLine ends the line there.
 				if (byte !== NEWLINE) index++;
 			}
 		}
@@ -260,7 +230,6 @@ class JsonlScanner {
 		this.#stringDecoder = null;
 	}
 
-	/** Malformed line: count it and resynchronize at its newline. */
 	#fail(): void {
 		this.#invalid.push(this.#line);
 		this.#mode = "skipLine";
@@ -290,7 +259,6 @@ class JsonlScanner {
 			return;
 		}
 		if (frame.target === null) {
-			// Skipped container (shared frozen frame): no value to attach, no field to write.
 			this.#mode = frame.array ? "arrayCommaOrEnd" : "objectCommaOrEnd";
 			return;
 		}
@@ -378,8 +346,6 @@ class JsonlScanner {
 			if (policy.kind === "keep") {
 				this.#stack.push({ array, policy, target: array ? [] : newObject(), key: "", count: 0 });
 			} else {
-				// Skipped container: the shared frame carries the bracket kind for
-				// mismatched-close checks; key and count on it are never read.
 				this.#stack.push(array ? SKIP_ARRAY_FRAME : SKIP_OBJECT_FRAME);
 			}
 			this.#mode = array ? "arrayValueOrEnd" : "objectKeyOrEnd";
@@ -438,7 +404,6 @@ class JsonlScanner {
 		this.#stringParts.length = 0;
 		this.#stringStored = 0;
 		if (this.#stringCapture) {
-			// A string a malformed line cut short may have left partial bytes in the decoder; drop them.
 			this.#decoder.decode();
 			this.#stringDecoder = this.#decoder;
 		} else this.#stringDecoder = null;
@@ -448,11 +413,6 @@ class JsonlScanner {
 		this.#hex = "";
 	}
 
-	/**
-	 * Index of the next `byte` in `chunk` at or after `from`, reusing the cached
-	 * position while it is still ahead: each chunk is then searched once per byte
-	 * kind in total instead of once per string run (escapes made that quadratic).
-	 */
 	#nextOf(slot: 0 | 1 | 2, byte: number, chunk: Uint8Array, from: number): number {
 		const cached = this.#next[slot];
 		if (cached === -1 || cached >= from) return cached;
@@ -461,7 +421,6 @@ class JsonlScanner {
 		return found;
 	}
 
-	/** Consumes string bytes from `index`; returns the next unconsumed index. */
 	#stringRun(chunk: Uint8Array, index: number): number {
 		if (this.#escape !== 0) {
 			const byte = chunk[index] ?? 0;
@@ -497,7 +456,6 @@ class JsonlScanner {
 		return stop + 1;
 	}
 
-	/** Measures (and captures) raw UTF-8 bytes; false when a control byte makes the line invalid. */
 	#rawBytes(chunk: Uint8Array, from: number, to: number): boolean {
 		if (!this.#stringMeasure) return true;
 		let length = 0;
@@ -507,7 +465,6 @@ class JsonlScanner {
 				this.#fail();
 				return false;
 			}
-			// UTF-16 length: ASCII and 2/3-byte leads count 1, 4-byte leads 2, continuations 0.
 			if (byte < 0x80 || (byte >= 0xc0 && byte < 0xf0)) length++;
 			else if (byte >= 0xf0) length += 2;
 		}
@@ -593,14 +550,8 @@ class JsonlScanner {
 	}
 }
 
-/** Bytes `fileChunks` reads at a time. */
 const READ_BYTES = 256 * 1024;
 
-/**
- * A file's bytes as successive views of one reused buffer: each view is valid
- * until the next is requested, so a whole-file scan allocates one buffer
- * instead of one per chunk.
- */
 export async function* fileChunks(file: string): AsyncGenerator<Uint8Array> {
 	const handle = await open(file, "r");
 	try {
@@ -615,12 +566,6 @@ export async function* fileChunks(file: string): AsyncGenerator<Uint8Array> {
 	}
 }
 
-/**
- * Scans a JSONL byte stream (`fileChunks(path)`, or any chunk sequence) with
- * `policy`, calling `onRecord` per parsed line. Chunk boundaries may fall
- * anywhere, including inside a UTF-8 character or an escape; a chunk is no
- * longer read once the next is requested, so its buffer may be reused.
- */
 export async function scanChunks(
 	chunks: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
 	policy: (line: number) => Policy,

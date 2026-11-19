@@ -1,5 +1,3 @@
-// session-urls `?type=` filter: every accepted form selects the intended events,
-// exclusions win over inclusions, and bad tokens fail with the accepted forms.
 import { describe, expect, test } from "bun:test";
 import type { Call, SessionEvent } from "../src/events.ts";
 import { keeps, parseTypeFilter, type TypeFilter } from "../src/filter.ts";

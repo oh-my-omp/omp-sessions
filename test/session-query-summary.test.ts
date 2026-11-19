@@ -1,5 +1,3 @@
-// session_query summary: the budgeted serializer returns exactly
-// JSON.stringify's text when it fits the budget and null as soon as it does not.
 import { describe, expect, test } from "bun:test";
 import { jsonWithin } from "../src/query/tool.ts";
 

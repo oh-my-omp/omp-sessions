@@ -1,9 +1,3 @@
-// Running caller SQL on a session database, and exporting a query result.
-// Statements are parsed by DuckDB and admitted by statement type: queries and
-// changes to the database's own tables, macros and views. Statements that
-// configure the engine or reach files (COPY, EXPORT, ATTACH, INSTALL, LOAD,
-// SET, PRAGMA, CALL, …) are refused; export writes its file from a separate
-// engine that runs no caller SQL.
 import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -30,13 +24,6 @@ export type SqlResult =
 	| { readonly kind: "rows"; readonly columns: readonly string[]; readonly rows: Record<string, Json>[]; readonly truncated: boolean }
 	| { readonly kind: "changes"; readonly changes: number };
 
-/**
- * Characters one `sql` result may spend: `limit` bounds the row count, the
- * budget bounds what those rows hold, so a single huge cell (one transcript
- * line can be 200 MB) never reaches the caller. Counted per value without
- * serializing a row: a string by its length, a number, boolean or null by its
- * JSON text, and a list or struct by its values recursively.
- */
 const RESULT_CHAR_BUDGET = 16 * 1024 * 1024;
 
 function valueChars(value: Json): number {
@@ -57,12 +44,6 @@ function statementName(type: StatementType): string {
 	return StatementType[type] ?? String(type);
 }
 
-/**
- * Runs every statement of `query` in order and returns the last one's result:
- * at most `limit` rows when it returns rows, within the character budget, else
- * the number of rows it changed. `truncated` reports that a row was not
- * returned. `params` bind the only statement; a script with parameters is refused.
- */
 export async function runSql(connection: DuckDBConnection, query: string, params: Bindings | null, limit: number): Promise<SqlResult> {
 	const extracted = await connection.extractStatements(query);
 	if (params !== null && extracted.count > 1) throw new Error("params bind a single statement; this query holds several");
@@ -78,9 +59,6 @@ export async function runSql(connection: DuckDBConnection, query: string, params
 			continue;
 		}
 		if (prepared.columnCount === 0) return { kind: "changes", changes: (await prepared.run()).rowsChanged };
-		// Chunks are read one at a time and converted one row at a time, so a
-		// result is never materialized whole: the previous shape fetched every
-		// row as JSON and then copied the array with slice.
 		const result = await prepared.stream();
 		try {
 			const columns = result.columnNames();
@@ -130,23 +108,14 @@ export interface ExportResult {
 	readonly columns: readonly string[];
 }
 
-/** The real path of an existing file or directory, or null when there is none. */
 function realPath(target: string): string | null {
 	try {
 		return realpathSync.native(target);
 	} catch {
-		// ENOENT or ENOTDIR: nothing exists at the path.
 		return null;
 	}
 }
 
-/**
- * An absolute export path outside the sessions directory, whose directory exists.
- * Both sides are compared as real paths, so another spelling of the sessions
- * directory (case, 8.3 short names, symbolic links) still lies inside it. omp's
- * `pathIsWithin` (`@oh-my-pi/pi-utils`) is not used: it resolves with
- * `fs.realpathSync`, which on Windows keeps 8.3 short names and junctions as written.
- */
 async function exportPath(target: string): Promise<string> {
 	if (!path.isAbsolute(target)) throw new Error(`export path ${target} is not absolute`);
 	const resolved = path.resolve(target);
@@ -161,7 +130,6 @@ async function exportPath(target: string): Promise<string> {
 	return resolved;
 }
 
-/** Runs `query` (one row-returning statement) and writes its whole result to `target`. */
 export async function exportResult(
 	connection: DuckDBConnection,
 	query: string,

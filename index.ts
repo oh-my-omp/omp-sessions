@@ -1,33 +1,3 @@
-/**
- * omp-sessions: the omp sessions on this machine (~/.omp/agent/sessions), for reading and for SQL.
- *
- * `session://` (src/handler.ts): a read-only internal-URL scheme. `read` renders a session's
- * active-branch timeline (thinking, speech, IRC, dispatches and subagent results in full; tool
- * calls as one-line signatures), filterable by event type and time window, single entries in
- * full, events/metadata JSONL with jq, and finds sessions by prompt-history FTS, title and
- * recap; `grep`/`glob` walk one tree (projects/<bucket>/<date>/<id>/timeline) through
- * readDirectory. Registered at factory load in omp's process-global InternalUrlRouter, for main
- * and subagent sessions alike; never replaces an omp-owned scheme or another owner's handler, and
- * a newer copy of this module replaces its own earlier registration.
- *
- * `session_query` (src/query/tool.ts): a top-level tool eval cells call as `tool.session_query`.
- * Registered synchronously at factory load with `defaultInactive`, and activated in
- * `session_start` through `applyActiveTools` (omomp-shared/active-tools.ts), which orders names by a
- * canonical rule (builtins first in registry order, others sorted by name), so the base system
- * prompt stays the same across `/restart` and the prompt cache survives it.
- * `sessions`, `agents` and `events` return rows; `sql` runs DuckDB on the calling session's
- * in-memory database (src/query/database.ts) with the call's relations in schema `src`, rebuilt
- * from the session files on every call and dropped after it (src/query/sources.ts); tables the
- * caller creates in `main` last until `session_switch` or `session_shutdown` closes the
- * database. `export` writes one query result to a file the caller names.
- *
- * Files: reads session files, history.db (prompt FTS, recaps); writes a per-call temp JSONL for
- * jq (removed before the read returns) and the files `export` is asked to write. Never writes
- * below the sessions directory.
- *
- * Failure policy: hooks and tools never throw into omp; registration and activation errors are
- * logged with `pi.logger.warn`, query failures come back as tool errors.
- */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { applyActiveTools } from "./omomp-shared/active-tools.ts";
 import { registerInternalScheme } from "./omomp-shared/internal-url.ts";

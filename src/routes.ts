@@ -1,7 +1,3 @@
-// session:// URL grammar → Route, and resolution of routes to session files.
-// One traversable tree (projects/<bucket>/<date>/<sid>/…) so grep never visits
-// a session twice; `session://<id-prefix>/…`, `here/…`, the metadata files and
-// detail leaves resolve directly but are not listed.
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -14,7 +10,6 @@ export type Locator =
 	| { readonly kind: "listed"; readonly bucket: BucketRef; readonly date: string; readonly sid: string };
 export interface SessionPath {
 	readonly locator: Locator;
-	/** Full subagent id, or "" for the root session. */
 	readonly agent: string;
 }
 
@@ -123,17 +118,11 @@ function route(host: string, rest: readonly string[], url: string): Route {
 	}
 }
 
-/** A parsed URL: its route plus the `type` filter written as a `type/<filter>/` path prefix (empty when absent). */
 export interface Target {
 	readonly route: Route;
 	readonly pathTypes: readonly string[];
 }
 
-/**
- * Parses a session:// URL's host and path (query handled by the caller).
- * `session://type/<filter>/<any other session:// path>` carries a type filter in
- * the path, where a glob can reach it (`?type=` after a glob segment is glob text).
- */
 export function parseTarget(host: string, pathname: string, url: string): Target {
 	const rest = pathname
 		.split("/")
@@ -146,14 +135,12 @@ export function parseTarget(host: string, pathname: string, url: string): Target
 	return { route: route(innerHost, inner, url), pathTypes: [filter] };
 }
 
-/** A located root session file. */
 export interface SessionRef {
 	readonly sid: string;
 	readonly file: string;
 	readonly bucket: string;
 }
 
-/** Parses an OMP session file name `<ISO-with-dashes>_<id>.jsonl`. */
 export function fileStamp(name: string): { readonly sid: string; readonly created: Date } | null {
 	const match = FILE_STAMP.exec(name);
 	if (!match) return null;
@@ -161,7 +148,6 @@ export function fileStamp(name: string): { readonly sid: string; readonly create
 	return Number.isNaN(created.getTime()) ? null : { sid: match[6] ?? "", created };
 }
 
-/** Local calendar date `YYYY-MM-DD` of `at`. */
 export function localDate(at: Date): string {
 	return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
 }
@@ -184,21 +170,12 @@ export function bucketDir(bucket: BucketRef, cwd: string | undefined): string {
 	return path.join(getSessionsDir(), bucketName(bucket, cwd));
 }
 
-/** A root session file in a bucket: its id, its creation time and its path. */
 export interface BucketSession {
 	readonly sid: string;
 	readonly created: Date;
 	readonly file: string;
 }
 
-/**
- * Session files directly in a bucket. A name carrying the file stamp gives the id
- * and creation time, and its header is not read. Any other `.jsonl` is a session
- * when its header holds an id and a valid creation time, and those give the id and
- * creation time. Stamped sessions come first and each kind is in file-name order,
- * so a session id shared by several files resolves to its stamped file first, and
- * without one to the header-named file whose name sorts first.
- */
 export async function bucketSessions(dir: string): Promise<BucketSession[]> {
 	const stamped: BucketSession[] = [];
 	const other: BucketSession[] = [];
@@ -216,10 +193,8 @@ export async function bucketSessions(dir: string): Promise<BucketSession[]> {
 	return [...stamped, ...other];
 }
 
-/** File-system codes of a bucket that cannot be listed: gone, not a directory, or not readable. */
 const UNAVAILABLE_BUCKET = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
 
-/** Sessions of one bucket during a scan of every bucket; an unavailable bucket holds none, as in the host's own scan. */
 async function scannedBucketSessions(dir: string): Promise<BucketSession[]> {
 	try {
 		return await bucketSessions(dir);
@@ -229,21 +204,12 @@ async function scannedBucketSessions(dir: string): Promise<BucketSession[]> {
 	}
 }
 
-/** Project bucket directories under the sessions root; none when the root is missing. */
 async function bucketDirs(): Promise<string[]> {
 	const root = getSessionsDir();
 	const entries = await fs.readdir(root, { withFileTypes: true }).catch((): Dirent[] => []);
 	return entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(root, entry.name));
 }
 
-/**
- * Root session files whose id starts with `prefix`. Files named by the stamp are
- * matched by name (findSessionFiles); the other session files of every bucket are
- * matched by the id in their headers. A header-named file whose id a stamped match
- * already holds is left out, so a session id shared by several files resolves to
- * its stamped file; distinct ids from either kind count toward ambiguity. A bucket
- * that cannot be listed is skipped; any other listing error propagates.
- */
 async function prefixMatches(prefix: string): Promise<SessionRef[]> {
 	if (!ID_PREFIX.test(prefix)) return [];
 	const refs: SessionRef[] = (await findSessionFiles(prefix)).flatMap((file) => {
@@ -262,7 +228,6 @@ async function prefixMatches(prefix: string): Promise<SessionRef[]> {
 	return refs;
 }
 
-/** The root session a locator names; throws on no match or an ambiguous prefix. */
 export async function locateSession(locator: Locator, cwd: string | undefined): Promise<SessionRef> {
 	switch (locator.kind) {
 		case "listed": {
@@ -291,12 +256,10 @@ export async function locateSession(locator: Locator, cwd: string | undefined): 
 	}
 }
 
-/** Directory holding a transcript's own children and artifacts: the file path without `.jsonl`. */
 export function childDir(file: string): string {
 	return file.slice(0, -".jsonl".length);
 }
 
-/** Subagent transcript for full id `A.B.C`: `<artifacts>/A/A.B/A.B.C.jsonl`, else a bounded search below the root. */
 export async function agentFile(root: SessionRef, agent: string): Promise<string> {
 	const parts = agent.split(".");
 	let dir = childDir(root.file);
@@ -314,7 +277,6 @@ async function searchFile(dir: string, name: string, depth: number): Promise<str
 	try {
 		entries = await fs.readdir(dir, { withFileTypes: true });
 	} catch {
-		// A missing artifacts directory simply holds no subagents.
 		return null;
 	}
 	if (entries.some((entry) => entry.isFile() && entry.name === name)) return path.join(dir, name);
@@ -326,13 +288,11 @@ async function searchFile(dir: string, name: string, depth: number): Promise<str
 	return null;
 }
 
-/** Subagent ids directly under a transcript (its `<file minus .jsonl>/` directory). */
 export async function childAgents(transcript: string): Promise<string[]> {
 	try {
 		const names = await fs.readdir(childDir(transcript));
 		return names.filter((name) => name.endsWith(".jsonl") && !name.startsWith("__advisor")).map((name) => name.slice(0, -".jsonl".length));
 	} catch {
-		// No artifacts directory: no subagents.
 		return [];
 	}
 }

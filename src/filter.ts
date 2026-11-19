@@ -1,13 +1,3 @@
-// `?type=` filter over timeline events. Accepted forms, freely combined:
-//   type=thinking             one event kind (the timeline header labels: calls, result … are aliases)
-//   type=thinking,say         a comma list;  type=say&type=irc   repeated parameters
-//   type=irc | speech | ai    a group of kinds (GROUPS below)
-//   type=call:bash            events carrying a call of that tool (plain calls, irc_out = write, dispatch = task)
-//   type=marker:compaction    markers of one kind (`-`, `_` and spaces are interchangeable)
-//   type=-call  type=!marker  exclusion; with no inclusion everything else is kept
-// Matching is case-insensitive. Unknown tokens throw, listing the accepted forms.
-// EventFilter ANDs this filter with the `since`/`until` window of window.ts;
-// loadFiltered applies both before events are built in full.
 import { buildEvents, indexSession, type LoadedSession, type SessionEvent } from "./events.ts";
 import { resolveWindow, type TimeWindow, type WindowSpec, within } from "./window.ts";
 
@@ -39,7 +29,6 @@ type Selector =
 export interface TypeFilter {
 	readonly include: readonly Selector[];
 	readonly exclude: readonly Selector[];
-	/** The filter as written, for headers and continuation hints. */
 	readonly source: string;
 }
 
@@ -47,7 +36,6 @@ function isKind(value: string): value is Kind {
 	return (KINDS as readonly string[]).includes(value);
 }
 
-/** `-`, `_` and spaces compare equal; case folded. */
 function fold(value: string): string {
 	return value
 		.trim()
@@ -81,7 +69,6 @@ function selector(token: string): Selector {
 	throw usage(token);
 }
 
-/** Parses every `type` value of a query; null when none is given (or all are empty). */
 export function parseTypeFilter(values: readonly string[]): TypeFilter | null {
 	const include: Selector[] = [];
 	const exclude: Selector[] = [];
@@ -113,40 +100,22 @@ function matches(selector: Selector, event: SessionEvent): boolean {
 	}
 }
 
-/** Whether `event` passes: any inclusion (or none given), and no exclusion. */
 export function keeps(filter: TypeFilter, event: SessionEvent): boolean {
 	if (filter.include.length > 0 && !filter.include.some((item) => matches(item, event))) return false;
 	return !filter.exclude.some((item) => matches(item, event));
 }
 
-/** Everything a URL filters events by: its type filter and its time window, combined by AND. */
 export interface EventFilter {
 	readonly types: TypeFilter | null;
 	readonly window: TimeWindow | null;
 }
 
-/** Whether `event` passes both the type filter and the time window. */
 export function shows(filter: EventFilter, event: SessionEvent): boolean {
 	return (filter.types === null || keeps(filter.types, event)) && (filter.window === null || within(filter.window, event));
 }
 
-/**
- * What a filtered read prints: `timeline` needs every event's structure (turn
- * spans and counts, the filter line's totals) and the first prompt's text;
- * `records` needs only the events the filter shows.
- */
 export type FilteredRead = "timeline" | "records";
 
-/**
- * Loads a session for a read filtered by `types` and the written window
- * `spec` (resolved against the session and `now`). When the read or the filter
- * needs it — `timeline` (turn spans, counts, the filter line), any `types`, or
- * a clock bound for `sessionDay` — a LIGHT outline of every branch entry is
- * built first, then `full` for the entries that print (and, for `timeline`,
- * the first prompt that labels an untitled session). The loaded events render
- * exactly as the fully built session filtered afterwards would. Without a
- * filter this is loadSession.
- */
 export async function loadFiltered(
 	file: string,
 	sid: string,
@@ -160,7 +129,6 @@ export async function loadFiltered(
 	const index = await indexSession(file, sid, agent, signal);
 	if (types === null && spec === null)
 		return { loaded: { meta: index.meta, events: await buildEvents(index, () => "full", signal) }, filter: { types, window: null } };
-	// A bare clock time takes its date from the session's events.
 	const clock = spec?.since?.kind === "clock" || spec?.until?.kind === "clock";
 	const outline = read === "timeline" || types !== null || clock ? await buildEvents(index, () => "light", signal) : null;
 	const filter: EventFilter = { types, window: spec === null ? null : resolveWindow(spec, outline ?? [], now) };
@@ -174,7 +142,6 @@ export async function loadFiltered(
 	}
 	const full = await buildEvents(index, (entry) => (printed.has(entry.line) ? "full" : "skip"), signal);
 	if (outline === null || read === "records") return { loaded: { meta: index.meta, events: full }, filter };
-	// An entry's events come out of LIGHT and FULL builds alike, so FULL ones replace LIGHT ones entry by entry.
 	const byLine = new Map<number, SessionEvent[]>();
 	for (const event of full) {
 		const built = byLine.get(event.line);

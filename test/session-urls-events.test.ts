@@ -1,8 +1,3 @@
-// session-urls session loading: the index pass picks the same branch, turns and
-// call completions the whole-file projection did; tool output is measured to the
-// same length contentText gave; the build pass reads only the branch entries a
-// caller asks for, LIGHT keeps every structural field of FULL, and subagent
-// results deduplicate over the whole branch whatever is skipped.
 import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -22,7 +17,6 @@ function sessionFile(records: readonly unknown[]): string {
 const SPEECH = 1 << 20;
 const HEADER = { type: "session", version: 3, id: "sid", timestamp: "2026-11-01T10:00:00.000Z", cwd: "/w" };
 
-/** textChars(contentText(content)) of the whole-file projection, from the parsed record. */
 function expectedChars(content: unknown): number {
 	if (typeof content === "string") return content.length;
 	if (!Array.isArray(content)) return 0;
@@ -57,7 +51,6 @@ const TASK_RESULT = '<task-result id="Kid" agent="task" status="completed" durat
 
 const K1_OUTPUT = [{ type: "text", text: "line 1\nline ✓ 😀" }, { type: "image" }, { type: "text", text: "" }];
 
-/** Every kind of entry, a duplicate subagent result, an abandoned branch with a prompt, and results off the branch. */
 const MIXED = [
 	{ type: "title", v: 1, title: "Mixed" },
 	HEADER,
@@ -94,14 +87,12 @@ const MIXED = [
 	entry("l", "j", 9, { type: "custom_message", customType: "irc:incoming", details: { from: "Peer", message: "hi back" } }),
 	entry("m", "l", 10, { type: "compaction", summary: "<summary>\ncompacted" }),
 	entry("n", "m", 11, { type: "custom", customType: "session_exit", data: { kind: "quit", reason: "done" } }),
-	// Abandoned branch off "c": its prompt must not count as a turn, its result for k4 still completes the call.
 	entry("x1", "c", 12, { type: "message", message: { role: "user", content: "abandoned prompt" } }),
 	entry("x2", "x1", 13, result("k4", "read", [{ type: "text", text: "a".repeat(SPEECH + 5) }, { type: "image" }], true)),
 	entry("o", "n", 14, { type: "label", label: "keep", targetId: "c" }),
 	entry("p", "o", 15, { type: "message", message: { role: "user", content: "second prompt" } }),
 ];
 
-/** The fields LIGHT keeps exact (see Build). */
 function structure(event: SessionEvent): unknown {
 	const base = { kind: event.kind, entry: event.entry, block: event.block, t: event.t, line: event.line, turn: event.turn };
 	switch (event.kind) {

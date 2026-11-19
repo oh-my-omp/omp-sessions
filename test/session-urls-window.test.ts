@@ -1,8 +1,3 @@
-// session-urls `?since=` / `?until=` window: every accepted form resolves to the
-// intended half-open span (both bounds include their whole written unit), zones
-// and local time differ correctly, a bare time anchors only to a single-date
-// session, a time cut short by read's selector peeling fails with the fix, and
-// the jq continuation bounds resolve back to the same window.
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "../src/events.ts";
 import { parseWindow, resolveWindow, type TimeWindow, windowQuery, within } from "../src/window.ts";

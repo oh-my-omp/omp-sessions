@@ -1,7 +1,3 @@
-// Renderers: the timeline (column-0 headers, every body line indented two
-// spaces), events JSONL for jq, and one-entry detail. Pure functions of the
-// loaded session; `base` is the session:// URL the reader used for this session
-// (or subagent), so every pointer printed here can be read back directly.
 import { type Call, type EntryDetail, type LoadedSession, rewriteRefs, type SessionEvent, type Text } from "./events.ts";
 import { type EventFilter, keeps, shows } from "./filter.ts";
 import { Clipped, type Projected, type ProjectedObject } from "./scanner.ts";
@@ -24,7 +20,6 @@ const PATH_KEYS: Readonly<Record<string, true>> = {
 };
 const COMMAND_KEYS: Readonly<Record<string, true>> = { command: true, cmd: true };
 
-/** Header-safe single line: control characters become spaces. */
 function flat(value: string): string {
 	return value.replace(/\p{Cc}+/gu, " ").trim();
 }
@@ -33,7 +28,6 @@ function textOf(value: Text): string {
 	return value instanceof Clipped ? value.text : value;
 }
 
-/** `1 call`, `2 calls`; `many` names an irregular plural (`entries`). */
 function plural(count: number, one: string, many = `${one}s`): string {
 	return `${count} ${count === 1 ? one : many}`;
 }
@@ -56,7 +50,6 @@ function localParts(iso: string): { date: string; time: string } | null {
 	};
 }
 
-/** Local ISO-8601 time with the UTC offset, e.g. `2026-10-26 16:18:30 +08:00`. */
 export function localStamp(iso: string): string {
 	const parts = localParts(iso);
 	if (!parts) return iso;
@@ -66,7 +59,6 @@ export function localStamp(iso: string): string {
 	return `${parts.date} ${parts.time} ${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
 }
 
-/** Body lines, each indented two spaces; a clipped text ends with a pointer to the full entry. */
 function body(value: Text, detail: string): string[] {
 	const lines = textOf(value)
 		.split("\n")
@@ -108,7 +100,6 @@ function argValue(key: string, value: Projected, tool: string): string {
 	return `{${keys.slice(0, 5).join(",")}${keys.length > 5 ? ",…" : ""}}`;
 }
 
-/** Compact call signature: `tool(key=value, …)`, `i` dropped (shown as the intent). */
 export function signature(call: Call): string {
 	const args = call.args;
 	if (args === null || typeof args !== "object" || Array.isArray(args) || args instanceof Clipped) {
@@ -162,7 +153,6 @@ function turnHeader(turn: number, events: readonly SessionEvent[]): string {
 	return parts.join(" · ");
 }
 
-/** Lines of one non-call event. */
 function eventLines(event: Exclude<SessionEvent, { kind: "call" }>, time: string, base: string, root: string): string[] {
 	const detail = `${base}/entry/${event.entry}`;
 	switch (event.kind) {
@@ -204,10 +194,6 @@ function eventLines(event: Exclude<SessionEvent, { kind: "call" }>, time: string
 	}
 }
 
-/**
- * The `filter …` header line, or null when nothing is filtered. The window is
- * printed as a half-open interval of local stamps: `time [14:30:00 …, 15:00:00 …)`.
- */
 function filterLine(events: readonly SessionEvent[], filter: EventFilter): string | null {
 	if (filter.types === null && filter.window === null) return null;
 	const parts = ["filter"];
@@ -222,17 +208,6 @@ function filterLine(events: readonly SessionEvent[], filter: EventFilter): strin
 	return summary.join(" · ");
 }
 
-/**
- * The timeline: header, then per turn a turn line and its events; consecutive
- * calls of one assistant entry share a `calls` header. `root` is the root
- * session's canonical URL (subagent results point under it); `title` is OMP's
- * indexed title, else the journal's, else the first prompt (as OMP's own
- * session listing names untitled sessions). With a filter, only matching
- * events are printed; turn lines keep the whole turn's span and counts, turns
- * without a match are left out, and an idle gap or date change that fell on an
- * event hidden by type is printed before the next shown one. Events outside the
- * time window do not count toward idle gaps.
- */
 export function renderTimeline(loaded: LoadedSession, base: string, root: string, title: string | null, filter: EventFilter): string {
 	const { meta, events } = loaded;
 	const firstPrompt = events.find((event) => event.kind === "user");
@@ -297,7 +272,6 @@ export function renderTimeline(loaded: LoadedSession, base: string, root: string
 	return `${lines.join("\n")}\n`;
 }
 
-/** Plain JSON value of a projection; a clipped string becomes its prefix plus a clip marker. */
 export function toJson(value: Projected): unknown {
 	if (value instanceof Clipped) return `${value.text}…[clipped: ${value.chars} chars total]`;
 	if (Array.isArray(value)) return value.map(toJson);
@@ -354,7 +328,6 @@ function eventFields(event: SessionEvent): Record<string, unknown> {
 	}
 }
 
-/** One JSON object per event that `filter` shows, for jq, produced as the caller reads them. */
 export function* eventRecords(loaded: LoadedSession, base: string, filter: EventFilter): Generator<Record<string, unknown>> {
 	const { meta } = loaded;
 	for (const event of loaded.events) {
@@ -388,7 +361,6 @@ function contentText(value: Projected | undefined): string | null {
 		.join("\n");
 }
 
-/** One entry in full: a tool result shows its call (arguments, intent, timing) and the whole result text. */
 export function renderEntry(detail: EntryDetail, base: string, sid: string): string {
 	const record = detail.record;
 	const fields = record !== null && typeof record === "object" && !Array.isArray(record) && !(record instanceof Clipped) ? record : null;

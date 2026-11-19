@@ -1,5 +1,3 @@
-// session_query export guard: a file below the sessions directory is refused
-// under every spelling that reaches it, and a file outside is written.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";

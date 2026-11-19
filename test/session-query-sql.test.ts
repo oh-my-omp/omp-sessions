@@ -1,6 +1,3 @@
-// session_query `sql`: runSql returns the last statement's rows as JSON, shuts
-// off at the row limit and at the character budget, and reports truncation;
-// statements that change rows come back as their count.
 import { afterAll, describe, expect, test } from "bun:test";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { runSql } from "../src/query/run.ts";
@@ -74,7 +71,6 @@ describe("runSql character budget", () => {
 	const megabyte = 1024 * 1024;
 
 	test("returns the rows that fit 16 MiB and holds back the one that does not", async () => {
-		// Two 8 MiB values fill the budget exactly; the third row does not fit.
 		const result = await runSql(connection, `SELECT repeat('x', ${8 * megabyte}) AS v FROM range(3)`, null, 100);
 		expect(result.kind).toBe("rows");
 		if (result.kind !== "rows") return;

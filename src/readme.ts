@@ -1,4 +1,3 @@
-// Text served at session://README: the grammar and the find → read → detail loop.
 export const README = `session:// — read other OMP sessions on this machine (read-only, rendered on each read)
 
 FIND A SESSION
