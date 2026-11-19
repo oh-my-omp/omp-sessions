@@ -46,9 +46,7 @@ impl Cache {
 			return Ok(None);
 		}
 		let dir = PathBuf::from(&context.cache_dir);
-		let sessions = Path::new(&context.sessions_dir);
-		let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-		if !context.sessions_dir.is_empty() && real(&dir).starts_with(real(sessions)) {
+		if !context.sessions_dir.is_empty() && real(&dir).starts_with(real(Path::new(&context.sessions_dir))) {
 			return Err(EngineError::bad_request(format!("cacheDir {} lies inside sessionsDir {}", context.cache_dir, context.sessions_dir)));
 		}
 		Ok(Some(Cache { dir }))
@@ -190,6 +188,25 @@ fn device_and_inode(metadata: &fs::Metadata) -> (u64, u64) {
 #[cfg(not(unix))]
 fn device_and_inode(_metadata: &fs::Metadata) -> (u64, u64) {
 	(0, 0)
+}
+
+/// `path` with symlinks resolved, also when it does not exist yet: its nearest
+/// existing ancestor is resolved and the remaining components appended.
+fn real(path: &Path) -> PathBuf {
+	let mut missing = Vec::new();
+	let mut at = path;
+	loop {
+		if let Ok(resolved) = fs::canonicalize(at) {
+			return missing.iter().rev().fold(resolved, |joined, part| joined.join(part));
+		}
+		match (at.file_name(), at.parent()) {
+			(Some(name), Some(parent)) => {
+				missing.push(name.to_os_string());
+				at = parent;
+			}
+			_ => return path.to_path_buf(),
+		}
+	}
 }
 
 /// The leading bytes of an entry, enough for its header.
@@ -721,6 +738,26 @@ mod tests {
 			result_chars: Some(12),
 			dur_ms: Some(-3),
 		}
+	}
+
+	#[test]
+	fn a_cache_dir_inside_sessions_is_refused_before_it_exists() {
+		// The system temp dir sits behind a symlink on macOS (/var -> /private/var).
+		let root = std::env::temp_dir().join(format!("omp-sessions-cache-test-{}", std::process::id()));
+		let sessions = root.join("sessions");
+		fs::create_dir_all(&sessions).unwrap();
+		let context = |cache: &Path| Context {
+			sessions_dir: sessions.to_string_lossy().into_owned(),
+			here_dir: String::new(),
+			cache_dir: cache.to_string_lossy().into_owned(),
+			cwd: String::new(),
+			session_id: None,
+		};
+		let inside = Cache::of(&context(&sessions.join("bucket").join("cache")));
+		let beside = Cache::of(&context(&root.join("cache")));
+		fs::remove_dir_all(&root).unwrap();
+		assert_eq!(inside.err().map(|error| error.kind), Some(crate::error::ErrorKind::BadRequest));
+		assert!(beside.is_ok_and(|cache| cache.is_some()));
 	}
 
 	#[test]
