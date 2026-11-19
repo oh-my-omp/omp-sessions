@@ -44,7 +44,7 @@ omp install https://github.com/oh-my-omp/omp-sessions#release
 
 ## 宿主耦合
 
-所有 omp 内部 import（URL 路由、会话列表、索引与加载辅助函数、`tools/read-json`）集中在 `src/omp-adapter.ts`；omp 升级挪动其中任何一个时在加载时报错。scheme 处理器不覆盖 omp 自带的 `session` scheme 或其他宿主的处理器。
+所有 omp 内部 import 集中在 `src/omp-adapter.ts`；omp 升级挪动其中任何一个时在加载时报错。URL 路由、会话条目类型与会话列表从宿主的包根和 `internal-urls` barrel 取得，它们由宿主导出；历史存储、会话索引与路径、`tools/read-json` 是宿主子路径。scheme 处理器不覆盖 omp 自带的 `session` scheme 或其他宿主的处理器。
 
 ## 发布
 

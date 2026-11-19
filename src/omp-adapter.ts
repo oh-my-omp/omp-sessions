@@ -1,11 +1,19 @@
-// Every omp-internal module this package depends on, in one place. These are
-// host subpaths (no plugin API contract); an omp upgrade that moves one fails
-// here at load, which omp reports as an extension load error.
-import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+// Every omp-internal import this package depends on, in one place. Symbols the
+// host exports from its package root or its `internal-urls` barrel come from
+// there; the rest are host subpaths (no plugin API contract). An omp upgrade
+// that moves a subpath module fails here at load, which omp reports as an
+// extension load error.
+import {
+	findSessionFiles,
+	listRecentSessions,
+	readSessionInfo,
+	resolveSessionLeafId,
+	type SessionEntry,
+	type SessionInfo,
+} from "@oh-my-pi/pi-coding-agent";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { resolveSessionLeafId, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { listSessionRecaps } from "@oh-my-pi/pi-coding-agent/session/session-index";
-import { findSessionFiles, listRecentSessions, readSessionInfo, type SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { executeJsonQuery, type JsonSelector, parseJsonSelector } from "@oh-my-pi/pi-coding-agent/tools/read-json";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
@@ -16,7 +24,7 @@ export type {
 	ProtocolHandler,
 	ResolveContext,
 	SchemeSpec,
-} from "@oh-my-pi/pi-coding-agent/internal-urls/types";
+} from "@oh-my-pi/pi-coding-agent/internal-urls";
 export { type ShellFsDirEntry, ShellFsFileType } from "@oh-my-pi/pi-natives";
 export type { JsonSelector, SessionInfo };
 
