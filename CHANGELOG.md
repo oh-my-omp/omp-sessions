@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-11-20
+
 ### Fixed
 
 - A sid-prefix lookup now also matches header-named session files when a stamped name shares the prefix, and distinct ids from stamped names and headers make the prefix ambiguous
