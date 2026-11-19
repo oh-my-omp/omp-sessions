@@ -1,9 +1,10 @@
 //! Running caller SQL on the query process's database, and exporting a query
 //! result. Statements are parsed by DuckDB and admitted by statement type:
 //! queries and changes to the database's own tables, macros and views.
-//! Statements that configure the engine or reach files (COPY, EXPORT, ATTACH,
-//! INSTALL, LOAD, SET, PRAGMA, CALL, …) are refused; export writes its file
-//! from a separate database that runs no caller SQL.
+//! Statements that configure the engine or reach files (ATTACH, INSTALL, LOAD,
+//! SET, PRAGMA, CALL, …) are refused. A COPY or EXPORT naming a file fails
+//! earlier, while DuckDB prepares it: the locked file-system access rejects the
+//! path. Export writes its file from a separate database that runs no caller SQL.
 
 use std::path::{Component, Path, PathBuf};
 
