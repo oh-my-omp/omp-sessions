@@ -41,8 +41,6 @@ import {
 } from "./routes.ts";
 import { parseWindow, type WindowSpec, windowQuery } from "./window.ts";
 
-export const HANDLER_MARK = Symbol.for("omp-sessions.session-urls.handler.v1");
-
 const JQ_KEYS: Readonly<Record<string, true>> = { q: true, query: true, raw: true, compact: true, offset: true, limit: true };
 const FIND_KEYS: Readonly<Record<string, true>> = { text: true, project: true, max: true };
 const TYPE_KEYS: Readonly<Record<string, true>> = { type: true };
@@ -380,7 +378,6 @@ function allowedKeys(route: Route): readonly Readonly<Record<string, true>>[] {
 
 export class SessionUrlHandler implements ProtocolHandler {
 	readonly scheme = "session";
-	readonly [HANDLER_MARK] = true;
 	readonly spec: SchemeSpec = { backing: "file", selectors: "lines", immutable: true, linkable: false };
 
 	promptDoc(): string {
