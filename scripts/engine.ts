@@ -11,17 +11,26 @@ const binary = `omp-sessions-engine${process.platform === "win32" ? ".exe" : ""}
 /** The generated protocol types the shell imports. */
 export const PROTOCOL_TS = path.join(root, "src", "engine", "protocol.ts");
 
-function cargo(args: readonly string[], capture = false): string {
-	const run = Bun.spawnSync(["cargo", ...args, "--manifest-path", manifest], {
-		cwd: root,
-		stdout: capture ? "pipe" : "inherit",
-		stderr: "inherit",
-	});
-	if (run.exitCode !== 0) {
-		process.stderr.write(`cargo ${args.join(" ")} failed with exit code ${run.exitCode}\n`);
-		process.exit(run.exitCode ?? 1);
-	}
-	return capture ? run.stdout.toString() : "";
+function exitOnFailure(args: readonly string[], exitCode: number | null): void {
+	if (exitCode === 0) return;
+	process.stderr.write(`cargo ${args.join(" ")} failed with exit code ${exitCode}\n`);
+	process.exit(exitCode ?? 1);
+}
+
+/** `cargo <subcommand> --manifest-path engine/Cargo.toml <rest>`: the path goes before a `--` that `rest` may carry. */
+function argv([subcommand = "", ...rest]: readonly string[]): string[] {
+	return ["cargo", subcommand, "--manifest-path", manifest, ...rest];
+}
+
+function cargo(args: readonly string[]): void {
+	const run = Bun.spawnSync(argv(args), { cwd: root, stdout: "inherit", stderr: "inherit" });
+	exitOnFailure(args, run.exitCode);
+}
+
+function cargoOutput(args: readonly string[]): string {
+	const run = Bun.spawnSync(argv(args), { cwd: root, stdout: "pipe", stderr: "inherit" });
+	exitOnFailure(args, run.exitCode);
+	return run.stdout.toString();
 }
 
 function build(): void {
@@ -34,7 +43,7 @@ function build(): void {
 
 function check(): void {
 	cargo(["clippy", "--all-targets", "--features", "ts", "--quiet", "--", "-D", "warnings"]);
-	const fresh = cargo(["run", "--quiet", "--features", "ts", "--bin", "protocol-ts"], true);
+	const fresh = cargoOutput(["run", "--quiet", "--features", "ts", "--bin", "protocol-ts"]);
 	const committed = readFileSync(PROTOCOL_TS, "utf8");
 	if (fresh !== committed) {
 		process.stderr.write(
@@ -45,7 +54,7 @@ function check(): void {
 }
 
 async function protocol(): Promise<void> {
-	await Bun.write(PROTOCOL_TS, cargo(["run", "--quiet", "--features", "ts", "--bin", "protocol-ts"], true));
+	await Bun.write(PROTOCOL_TS, cargoOutput(["run", "--quiet", "--features", "ts", "--bin", "protocol-ts"]));
 	process.stdout.write(`${path.relative(root, PROTOCOL_TS)}\n`);
 }
 
