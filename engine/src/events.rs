@@ -576,7 +576,7 @@ static ARTIFACT_REF: LazyLock<Regex> =
 static AGENT_REF: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"(?-u:\b)(?:agent|history)://([A-Za-z0-9_.-]+)").expect("static regex"));
 static LOCAL_REF: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r#"(?-u:\b)local://([^\s\x{FEFF})\]'"<>]+)"#).expect("static regex"));
+	LazyLock::new(|| Regex::new(r#"(?-u:\b)local://([^\s\x{FEFF})\]`'"<>]+)"#).expect("static regex"));
 
 /// Rewrites references to the owning session's resources into session:// URLs.
 pub fn rewrite_refs(text: &str, sid: &str) -> String {
