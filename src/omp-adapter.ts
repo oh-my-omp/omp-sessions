@@ -4,6 +4,7 @@ import {
 	readSessionInfo,
 	resolveSessionLeafId,
 	type SessionEntry,
+	type SessionEntryBase,
 	type SessionInfo,
 } from "@oh-my-pi/pi-coding-agent";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -43,11 +44,9 @@ export function promptMatches(query: string, limit: number): string[] {
 	return HistoryStorage.open().matchingSessionIds(query, limit);
 }
 
-export interface LeafNode {
-	readonly id: string;
-	readonly activeLeafId?: string | null;
-}
+/** Entry fields the index materializes; resolveSessionLeafId reads only id and activeLeafId. */
+export type LeafNode = Pick<SessionEntryBase, "id" | "parentId" | "activeLeafId">;
 
 export function activeLeaf(nodes: readonly LeafNode[]): string | null {
-	return resolveSessionLeafId(nodes as unknown as SessionEntry[]);
+	return resolveSessionLeafId(nodes as SessionEntry[]);
 }
