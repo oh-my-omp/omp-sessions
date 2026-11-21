@@ -196,7 +196,7 @@ const TOPICS = [
 
 const TOPIC_POINTERS = [
 	"Topics — read the one a call needs before making it:",
-	...TOPICS.map((topic) => `- \`xd://${TOOL}/${topic.name}\` — ${topic.when}`),
+	...TOPICS.map((topic) => `- \`help://${TOOL}/${topic.name}\` — ${topic.when}`),
 ].join("\n");
 
 function topics(): Readonly<Record<string, string>> {

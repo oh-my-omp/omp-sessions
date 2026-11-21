@@ -5,7 +5,7 @@
 ### Breaking Changes
 
 - `session_query` no longer has the `sessions` action or its `project`, `text`, `since` and `until` parameters; a `sessions` call fails with `bad_request` naming omp's `archive` eval global, which lists sessions, searches prompts and reads recaps
-- `session://find`, `session://README` and the three `sessions.jsonl` URLs are gone, and `src.sessions` has no `recap` column; the `session://` grammar is now at `xd://read/urls`
+- `session://find`, `session://README` and the three `sessions.jsonl` URLs are gone, and `src.sessions` has no `recap` column; the `session://` grammar is now at `help://read/urls`
 
 ### Changed
 

@@ -8,7 +8,7 @@
  * `session://` (src/handler.ts): a read-only internal-URL scheme. `read` renders a session's
  * active-branch timeline, filterable by event type and time window, single entries in full and
  * events JSONL with jq; `grep`/`glob` walk one tree (projects/<bucket>/<date>/<id>/timeline)
- * through readDirectory. The URL grammar is served at `xd://read/urls`. Each call runs one
+ * through readDirectory. The URL grammar is served at `help://read/urls`. Each call runs one
  * engine read process. Registered at factory load in omp's process-global InternalUrlRouter,
  * for main and subagent sessions alike; never replaces an omp-owned scheme or another owner's
  * handler, and a newer copy of this module replaces its own earlier registration.

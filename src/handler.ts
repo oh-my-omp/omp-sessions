@@ -42,10 +42,10 @@ export class SessionUrlHandler implements ProtocolHandler {
 	}
 
 	promptDoc(): string {
-		return "`session://`: other OMP sessions on this machine (read-only). Read: `session://<id>/timeline` (thinking, speech, IRC, calls as signatures; `?type=thinking,irc` filters by kind, `?since=1430&until=1500` or `?since=2h` by time, no raw `:` at the URL's end), `…/entry/<id>` for one call's full args/result, `…/events.jsonl?q=<jq>`; grep `session://here/<date>/*/timeline` (filtered: `session://type/<types>/here/…`); find sessions with the `archive` eval global. Grammar: `read xd://read/urls`.";
+		return "`session://`: other OMP sessions on this machine (read-only). Read: `session://<id>/timeline` (thinking, speech, IRC, calls as signatures; `?type=thinking,irc` filters by kind, `?since=1430&until=1500` or `?since=2h` by time, no raw `:` at the URL's end), `…/entry/<id>` for one call's full args/result, `…/events.jsonl?q=<jq>`; grep `session://here/<date>/*/timeline` (filtered: `session://type/<types>/here/…`); find sessions with the `archive` eval global. Grammar: `read help://read/urls`.";
 	}
 
-	/** The whole URL grammar, served by omp at `xd://read/urls`. */
+	/** The whole URL grammar, served by omp at `help://read/urls`. */
 	promptReference(): string {
 		return readFileSync(new URL("../engine/url-grammar.md", import.meta.url), "utf8").trim();
 	}
