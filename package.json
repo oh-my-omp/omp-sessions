@@ -11,6 +11,8 @@
 		"index.ts",
 		"src",
 		"omomp-shared",
+		"engine/url-grammar.md",
+		"engine/digests.json",
 		"CHANGELOG.md"
 	],
 	"omp": {
@@ -26,9 +28,6 @@
 		"engine:build": "bun scripts/engine.ts build",
 		"format": "biome check --write .",
 		"test": "bun test && bun scripts/engine.ts test"
-	},
-	"dependencies": {
-		"@duckdb/node-api": "latest"
 	},
 	"peerDependencies": {
 		"@oh-my-pi/pi-coding-agent": "*",
