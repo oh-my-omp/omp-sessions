@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
 ### Breaking Changes
 
 - `session_query` no longer has the `sessions` action or its `project`, `text`, `since` and `until` parameters; a `sessions` call fails with `bad_request` naming omp's `archive` eval global, which lists sessions, searches prompts and reads recaps
