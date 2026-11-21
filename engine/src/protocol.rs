@@ -22,7 +22,9 @@ pub struct Context {
 	pub sessions_dir: String,
 	/// The caller's project session directory (`sessionDirForCwd(cwd)`), the target of `session://here/`.
 	pub here_dir: String,
-	/// The engine's cache directory under omp's agent cache root.
+	/// The engine's cold cache directory under omp's agent cache root (decision
+	/// §16). Empty: no cache is read or written. A request that loads a
+	/// transcript while it lies inside `sessionsDir` is a `bad_request`.
 	pub cache_dir: String,
 	/// The caller's working directory.
 	pub cwd: String,

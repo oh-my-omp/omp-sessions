@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::cache::{self, Cache, Source};
 use crate::error::{EngineError, Result};
 use crate::events::{self, Build, EventKind, LoadedSession, SessionEvent};
 use crate::window::{self, TimeWindow, WindowSpec};
@@ -196,8 +197,12 @@ pub fn shows(filter: &EventFilter, event: &SessionEvent) -> bool {
 /// branch entry is built first, then `Full` for the entries that print (and,
 /// for `Timeline`, the first prompt that labels an untitled session). The
 /// loaded events render exactly as the fully built session filtered
-/// afterwards would. Without a filter this is `load_session`.
+/// afterwards would. Without a filter this is `load_session`. A session the
+/// cold cache holds in full (or builds in full to store) is filtered from
+/// those events instead, to the same events.
+#[allow(clippy::too_many_arguments)]
 pub fn load_filtered(
+	cache: Option<&Cache>,
 	file: &Path,
 	sid: &str,
 	agent: &str,
@@ -206,7 +211,10 @@ pub fn load_filtered(
 	now_ms: i64,
 	read: FilteredRead,
 ) -> Result<(LoadedSession, EventFilter)> {
-	let index = events::index_session(file, sid, agent)?;
+	let index = match cache::source(cache, file, sid, agent, now_ms)? {
+		Source::Full(loaded) => return from_full(loaded, types, spec, now_ms, read),
+		Source::Index(index) => index,
+	};
 	if types.is_none() && spec.is_none() {
 		let events = events::build_events(&index, &|_| Build::Full)?;
 		let loaded = LoadedSession { meta: index.meta, events };
@@ -277,6 +285,33 @@ pub fn load_filtered(
 	}
 	let loaded = LoadedSession { meta: index.meta, events };
 	Ok((loaded, filter))
+}
+
+/// [`load_filtered`] over a fully built session: the window resolves against
+/// the same timestamps, `Timeline` keeps every event, and `Records` keeps the
+/// events of the entries that print.
+fn from_full(
+	loaded: LoadedSession,
+	types: Option<TypeFilter>,
+	spec: Option<WindowSpec>,
+	now_ms: i64,
+	read: FilteredRead,
+) -> Result<(LoadedSession, EventFilter)> {
+	if types.is_none() && spec.is_none() {
+		return Ok((loaded, EventFilter { types: None, window: None }));
+	}
+	let resolved = match &spec {
+		None => None,
+		Some(spec) => Some(window::resolve_window(spec, &mut loaded.events.iter().map(|event| event.base.t.as_str()), now_ms)?),
+	};
+	let filter = EventFilter { types, window: resolved };
+	if read == FilteredRead::Timeline {
+		return Ok((loaded, filter));
+	}
+	let printed: HashSet<u64> = loaded.events.iter().filter(|event| shows(&filter, event)).map(|event| event.base.line).collect();
+	let LoadedSession { meta, mut events } = loaded;
+	events.retain(|event| printed.contains(&event.base.line));
+	Ok((LoadedSession { meta, events }, filter))
 }
 
 #[cfg(test)]

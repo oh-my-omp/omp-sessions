@@ -201,6 +201,8 @@ pub enum Build {
 pub struct SessionIndex {
 	pub meta: SessionMeta,
 	pub branch: Vec<BranchEntry>,
+	/// The `timestamp` of the file's last `type: "message"` entry (any branch).
+	pub last_message_t: Option<String>,
 	nodes: Vec<BranchNode>,
 	collector: Collector,
 }
@@ -1171,6 +1173,7 @@ pub fn index_session(file: &Path, sid: &str, agent: &str) -> Result<SessionIndex
 	let mut header: Option<Obj> = None;
 	let mut title: Option<String> = None;
 	let mut previous: Option<String> = None;
+	let mut last_message_t: Option<String> = None;
 	let stats = scan::scan_file(
 		file,
 		&mut |_| &SKELETON,
@@ -1208,6 +1211,9 @@ pub fn index_session(file: &Path, sid: &str, agent: &str) -> Result<SessionIndex
 			};
 			previous = Some(id.clone());
 			let t = strv(fields.get("timestamp")).unwrap_or("").to_string();
+			if strv(fields.get("type")) == Some("message") {
+				last_message_t = Some(t.clone());
+			}
 			let active = match fields.get("activeLeafId") {
 				None => None,
 				Some(Value::Null) => Some(None),
@@ -1281,6 +1287,7 @@ pub fn index_session(file: &Path, sid: &str, agent: &str) -> Result<SessionIndex
 			stats,
 		},
 		branch,
+		last_message_t,
 		nodes: branch_nodes,
 		collector,
 	})
@@ -1615,6 +1622,7 @@ mod tests {
 			branch: vec![BranchEntry { entry: "e1".to_string(), line: 1, t: String::new(), turn: 1 }],
 			nodes: vec![node],
 			collector: Collector::default(),
+			last_message_t: None,
 		};
 		let subresult = |id: &str| Item::Subresult {
 			id: id.to_string(),

@@ -16,7 +16,9 @@ sessionsDir: string,
  */
 hereDir: string, 
 /**
- * The engine's cache directory under omp's agent cache root.
+ * The engine's cold cache directory under omp's agent cache root (decision
+ * §16). Empty: no cache is read or written. A request that loads a
+ * transcript while it lies inside `sessionsDir` is a `bad_request`.
  */
 cacheDir: string, 
 /**

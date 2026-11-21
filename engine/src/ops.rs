@@ -5,6 +5,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::Deserialize;
 
+use crate::cache::Cache;
 use crate::error::{EngineError, ErrorKind, Result};
 use crate::filter::{self, FilteredRead};
 use crate::json::{Obj, Value};
@@ -99,7 +100,9 @@ pub fn handle(request: &Request) -> Result<Reply> {
 				Some(types) => filter::parse_type_filter(&[types.as_str()])?,
 				None => None,
 			};
-			let (loaded, filter) = filter::load_filtered(&file, &session.sid, agent, types, None, time::now_ms(), FilteredRead::Records)?;
+			let cache = Cache::of(context)?;
+			let (loaded, filter) =
+				filter::load_filtered(cache.as_ref(), &file, &session.sid, agent, types, None, time::now_ms(), FilteredRead::Records)?;
 			let records = render::event_records(&loaded, &transcript_url(&session.sid, agent), &filter);
 			let total = records.len() as u64;
 			let offset = offset.unwrap_or(0);
