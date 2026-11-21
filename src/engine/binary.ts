@@ -9,7 +9,7 @@
 // shell's version.
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { z } from "@oh-my-pi/pi-coding-agent";
+import { z } from "@oh-my-pi/omptype/zod";
 import { aborted, EngineFailure, unavailable } from "./failure.ts";
 
 /** The platforms omp's own natives support (omp packages/natives/native/loader-state.js). */

@@ -5,7 +5,8 @@
 // `export` in the calling omp session's query process (decision §2, §3).
 // Failures read `session_query <action> failed: <kind>: <message>` (decision §15).
 import { readFileSync } from "node:fs";
-import { type ExtensionContext, type ToolDefinition, z } from "@oh-my-pi/pi-coding-agent";
+import { z } from "@oh-my-pi/omptype/zod";
+import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n.ts";
 import { engineContext } from "../engine/context.ts";
 import { EngineFailure, failureText } from "../engine/failure.ts";
