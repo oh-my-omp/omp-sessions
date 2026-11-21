@@ -108,7 +108,8 @@ struct References {
 	/// The last part of every column reference (`e.text` gives `text`), lowercased.
 	columns: HashSet<String>,
 	/// A reference that reaches columns without naming them: `*`, `COLUMNS(…)`,
-	/// a positional `#n`, a natural join, a PIVOT or UNPIVOT.
+	/// a positional `#n`, a natural join, a PIVOT or UNPIVOT, or `src.events`
+	/// with its columns renamed (`e(c1, …)`).
 	unnamed_columns: bool,
 }
 
@@ -137,6 +138,11 @@ impl References {
 									self.event_names.insert(alias);
 								}
 								self.event_names.insert(table);
+								// `src.events e(c1, …)` renames columns by position, so references no longer carry their names.
+								let renamed = fields.get("column_name_alias").and_then(serde_json::Value::as_array).is_some_and(|names| !names.is_empty());
+								if renamed {
+									self.unnamed_columns = true;
+								}
 							}
 						}
 					}
@@ -916,6 +922,8 @@ mod tests {
 		// Whole rows, unnamed columns and statements the tree cannot name fill every column.
 		assert_eq!(filled("select sum(hash(e.rowid, e)) from src.events e"), every);
 		assert_eq!(filled("select hash(events) from src.events"), every);
+		assert_eq!(filled("select c5 from src.events e(c1, c2, c3, c4, c5)"), every);
+		assert_eq!(filled("select c1 from (select sid from src.events) t(c1)"), ["sid"]);
 		assert_eq!(filled("select * exclude (data) from src.events"), every);
 		assert_eq!(filled("select columns('t.*') from src.events"), every);
 		assert_eq!(filled("select count(*) from src.events natural join src.files"), every);
