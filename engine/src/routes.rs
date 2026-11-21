@@ -74,7 +74,7 @@ pub struct BucketSession {
 }
 
 /// The pointer every grammar error ends with.
-pub const GRAMMAR: &str = "The grammar is in xd://read/urls.";
+pub const GRAMMAR: &str = "The grammar is in help://read/urls.";
 /// Where listing and searching sessions moved (decision §8), as a sentence and as a clause.
 pub const ARCHIVE_HINT: &str = "List and search sessions with omp's archive eval global (archive.sessions, archive.search).";
 const ARCHIVE: &str = "list and search sessions with omp's archive eval global (archive.sessions, archive.search).";
@@ -246,7 +246,7 @@ fn route(host: &str, rest: &[String], url: &str) -> Result<Route> {
 			}
 			Ok(Route::Root)
 		}
-		"README" => Err(EngineError::bad_request("session://README was removed: the session:// grammar is in xd://read/urls.")),
+		"README" => Err(EngineError::bad_request("session://README was removed: the session:// grammar is in help://read/urls.")),
 		"sessions.jsonl" => Err(removed("session://sessions.jsonl")),
 		"find" => Err(removed("session://find")),
 		"here" => bucket_route(BucketRef::Here, rest, url),
@@ -617,7 +617,7 @@ mod tests {
 	fn removed_routes_name_their_replacement() {
 		assert_eq!(
 			message("session://README"),
-			(ErrorKind::BadRequest, "session://README was removed: the session:// grammar is in xd://read/urls.".into())
+			(ErrorKind::BadRequest, "session://README was removed: the session:// grammar is in help://read/urls.".into())
 		);
 		for (url, named) in [
 			("session://find?text=x", "session://find"),

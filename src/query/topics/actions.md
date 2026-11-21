@@ -13,4 +13,4 @@ Call from an eval cell and read `.details`: `(await tool.session_query({ action:
 - Finding sessions, their metadata and prompt search belong to omp's `archive` eval global; its session ids work as `sid` here.
 - A failed call is an error result reading `session_query <action> failed: <kind>: <message>`. `bad_request`, `not_found`, `ambiguous`, `refused` and `query_failed` mean the call itself needs changing; `aborted` means it was cancelled; `engine_exited` means the engine process ended before answering, and the call after it starts a new one; `engine_unavailable` names why the engine binary is missing.
 
-See `xd://session_query/sql` for the relations, what persists between calls, and what SQL may do.
+See `help://session_query/sql` for the relations, what persists between calls, and what SQL may do.

@@ -4,7 +4,7 @@
 
 - **`session://` scheme（对 `~/.omp/agent/sessions` 的 read、grep、glob）**
   - scheme 注册 — 功能：在 omp 进程级内部 URL 路由里注册只读的 `session` scheme，主会话、子代理和轻量模式都能用；不替换 omp 自有的 scheme 或其他所有者的处理器。时机：扩展加载时一次。实例：冲突时 omp 日志写 `omp-sessions: <reason>`。
-  - URL 语法 — 功能：完整的 `session://` 语法收在 omp 自己的 URL 说明里，系统提示词中 `session://` 那一行指向它。时机：模型读取时。实例：`read xd://read/urls`。
+  - URL 语法 — 功能：完整的 `session://` 语法收在 omp 自己的 URL 说明里，系统提示词中 `session://` 那一行指向它。时机：模型读取时。实例：`read help://read/urls`。
   - 找会话 — 功能：列项目和会话、搜索 prompt、取 recap 都用 omp 的 `archive` eval 全局；它给出的会话 id 可以直接用在任何 `session://` URL 里，也可以作为 `session_query` 的 `sid`。`session://find` 与各个 `sessions.jsonl` 路由已删除，prompt 搜索、标题和 recap 只在 `archive` 里。时机：在 eval 单元里。实例：`archive.sessions({ project: "*", limit: 5 })`、`archive.recaps({ project: "*" })`。
   - 时间线 — 功能：渲染会话的活动分支：user、developer、thinking、助手文本、IRC、任务派发和子代理结果完整显示，其他工具调用各占一行 `tool(args) status #<result entry> // intent`。时机：读取该 URL 时。实例：`session://01a1f4a1/timeline`。
   - 条目、事件和原文件 — 功能：完整显示单个条目、以 JSONL 给出同样的事件，或返回会话文件本身。时机：读取该 URL 时。实例：`session://01a1/entry/<id>`、`session://01a1/events.jsonl`、`session://01a1/raw.jsonl`。
@@ -21,7 +21,7 @@
   - SQL 限制 — 功能：拒绝 COPY、EXPORT、ATTACH、INSTALL、LOAD、SET、PRAGMA、CALL 及其他引擎或文件语句；SQL 只读取会话目录以下的文件，不写文件。时机：每条 `sql` 语句运行前。实例：`ATTACH 'x.db'` 被拒。
   - `export` action — 功能：把一个查询结果写成调用方指定的 parquet、csv 或 json 文件，永不写到会话目录以下。时机：`export` 调用时，需要写审批（其他 action 都是 `read`）。实例：`tool.session_query({ action: "export", query: "select …", path: "/tmp/turns.parquet", format: "parquet" })`。
   - 直接调用的输出上限 — 功能：直接调用时，`details` 不超过 8192 字符才以 JSON 文本显示。时机：在 eval 之外调用 `session_query` 时。实例：`sql: more than 8192 chars of JSON in details; call from eval and read .details`。
-  - `xd://session_query/actions` 与 `xd://session_query/sql` — 功能：说明各 action 返回的行，以及 `src` 关系、持久化和允许的 SQL。时机：模型读取时；工具说明最后几行指向它们。实例：``A view over `src` stops working after the call; keep results with `CREATE TABLE … AS`.``
+  - `help://session_query/actions` 与 `help://session_query/sql` — 功能：说明各 action 返回的行，以及 `src` 关系、持久化和允许的 SQL。时机：模型读取时；工具说明最后几行指向它们。实例：``A view over `src` stops working after the call; keep results with `CREATE TABLE … AS`.``
 - **引擎二进制与冷缓存**
   - 引擎二进制 — 功能：运行插件包内的 `engine/bin/omp-sessions-engine`。包里没有时，第一次调用从插件当前版本的 GitHub Release（`v<version>`）下载本平台的资产，按同一 Release 的 `digests.json` 校验 sha256 后才使用，之后的调用直接用下载好的文件。支持的平台：`darwin-arm64`、`darwin-x64`、`linux-x64`、`linux-arm64`、`win32-x64`、`win32-arm64`。时机：安装或更新后第一次 `session://` 读取或 `session_query` 调用时。实例：`https://github.com/oh-my-omp/omp-sessions/releases/download/v<version>/omp-sessions-engine-darwin-arm64`。
   - `engine_unavailable` — 功能：拿不到引擎二进制时，调用以原因失败，下一次调用会重新尝试；不会留下不完整的文件。`unsupported_platform`：omp 运行在上述六个平台之外，omp-sessions 在那里不能用。`not_built`：这个版本的 Release 还没有引擎资产（资产在发布之后上传，`digests.json` 最后一个），等 Release 列出它们后重试。`download_failed`：连不上 GitHub 或它返回了错误，能连上时重试。`digest_mismatch`：下载的资产或 `digests.json` 对不上，重试；一直如此就报告问题。时机：调用需要引擎进程却启动不了时。实例：`session://: engine_unavailable: not_built: …`、`session_query sql failed: engine_unavailable: download_failed: …`。
