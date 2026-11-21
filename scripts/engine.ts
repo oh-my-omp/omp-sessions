@@ -105,6 +105,12 @@ function gh(args: readonly string[]): void {
 	if (run.exitCode !== 0) fail(`gh ${args.join(" ")} exited ${run.exitCode}: ${run.stderr.toString().trim()}`);
 }
 
+function ghOutput(args: readonly string[]): string {
+	const run = Bun.spawnSync(["gh", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+	if (run.exitCode !== 0) fail(`gh ${args.join(" ")} exited ${run.exitCode}: ${run.stderr.toString().trim()}`);
+	return run.stdout.toString();
+}
+
 const SMOKE_SID = "01ff0000-0000-7000-8000-000000000057";
 const SMOKE_TEXT = "omp-sessions engine release smoke";
 
@@ -181,18 +187,13 @@ function plan(): void {
 	const version = typeof manifest === "object" && manifest !== null && "version" in manifest ? manifest.version : undefined;
 	if (typeof version !== "string" || version === "") fail("package.json has no version");
 	const tag = `v${version}`;
-	const view = Bun.spawnSync(["gh", "release", "view", tag, "--json", "assets", "--jq", ".assets[].name"], {
-		cwd: root,
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	if (view.exitCode !== 0) {
-		const error = view.stderr.toString().trim();
-		if (error !== "release not found") fail(`gh release view ${tag} exited ${view.exitCode}: ${error}`);
+	const tags = ghOutput(["release", "list", "--limit", "1000", "--json", "tagName", "--jq", ".[].tagName"]).split("\n");
+	if (!tags.includes(tag)) {
 		process.stderr.write(`${tag} has no GitHub Release; nothing to build\n`);
 		return;
 	}
-	if (view.stdout.toString().split("\n").includes(DIGESTS)) {
+	const assets = ghOutput(["release", "view", tag, "--json", "assets", "--jq", ".assets[].name"]).split("\n");
+	if (assets.includes(DIGESTS)) {
 		process.stderr.write(`${tag} already has ${DIGESTS}; nothing to build\n`);
 		return;
 	}
