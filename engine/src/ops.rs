@@ -1,7 +1,9 @@
 //! Request dispatch: one protocol op → one reply.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
+
+use serde::Deserialize;
 
 use crate::error::{EngineError, ErrorKind, Result};
 use crate::filter::{self, FilteredRead};
@@ -21,37 +23,73 @@ pub struct Answer {
 	pub response: Response,
 }
 
-/// Answers one request frame (one line of stdin, without its newline).
-pub fn answer(frame: &str) -> Answer {
-	let invalid = |id: u64, error: EngineError| Answer { op: "invalid", id, response: Response::of(id, Err(error)) };
-	let value: serde_json::Value = match serde_json::from_str(frame) {
-		Ok(value) => value,
-		Err(error) => return invalid(0, EngineError::bad_request(format!("malformed request frame: {error}"))),
-	};
-	let id = value.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
-	if let Some(protocol) = value.get("protocol").and_then(serde_json::Value::as_u64)
-		&& protocol != u64::from(PROTOCOL)
-	{
-		return invalid(
-			id,
-			EngineError::new(ErrorKind::ProtocolMismatch, format!("engine protocol {PROTOCOL}, request protocol {protocol}")),
-		);
+/// The fields every frame is read for before its shape is known.
+#[derive(Deserialize)]
+struct Envelope {
+	id: Option<u64>,
+	protocol: Option<u64>,
+	op: Option<String>,
+}
+
+/// A frame of stdin read as a request: the request, or the answer to a frame that is not one.
+pub enum Parsed {
+	Request(Request),
+	Invalid(Answer),
+}
+
+impl Parsed {
+	/// Reads `frame` (one line of stdin, without its newline). The frame is
+	/// parsed from its text, never through an intermediate map, so the key
+	/// order of caller rows survives.
+	pub fn of(frame: &str) -> Parsed {
+		let invalid = |id: u64, error: EngineError| Parsed::Invalid(Answer { op: "invalid", id, response: Response::of(id, Err(error)) });
+		let envelope: Envelope = match serde_json::from_str(frame) {
+			Ok(envelope) => envelope,
+			Err(error) => return invalid(0, EngineError::bad_request(format!("malformed request frame: {error}"))),
+		};
+		let id = envelope.id.unwrap_or(0);
+		if let Some(protocol) = envelope.protocol
+			&& protocol != u64::from(PROTOCOL)
+		{
+			return invalid(
+				id,
+				EngineError::new(ErrorKind::ProtocolMismatch, format!("engine protocol {PROTOCOL}, request protocol {protocol}")),
+			);
+		}
+		match serde_json::from_str::<Request>(frame) {
+			Ok(request) => Parsed::Request(request),
+			Err(error) => invalid(id, EngineError::bad_request(format!("malformed request frame: {error}"))),
+		}
 	}
-	match serde_json::from_value::<Request>(value) {
-		Ok(request) => Answer { op: request.op.name(), id, response: Response::of(id, handle(&request)) },
-		Err(error) => invalid(id, EngineError::bad_request(format!("malformed request frame: {error}"))),
+
+	/// Whether the frame is a query process `cancel` frame.
+	pub fn is_cancel(frame: &str) -> bool {
+		serde_json::from_str::<Envelope>(frame).is_ok_and(|envelope| envelope.op.as_deref() == Some("cancel"))
 	}
 }
 
+/// Answers one request frame of the read process.
+pub fn answer(frame: &str) -> Answer {
+	match Parsed::of(frame) {
+		Parsed::Invalid(answer) => answer,
+		Parsed::Request(request) => Answer { op: request.op.name(), id: request.id, response: Response::of(request.id, handle(&request)) },
+	}
+}
+
+/// Answers a read-process op; `sql` and `export` belong to the query process.
 pub fn handle(request: &Request) -> Result<Reply> {
 	let context = &request.context;
 	match &request.op {
+		Op::Sql { .. } | Op::Export { .. } => Err(EngineError::bad_request(format!(
+			"{} runs in the query process (omp-sessions-engine query), not in a read process",
+			request.op.name()
+		))),
 		Op::Resolve { url, skip_directory_listing } => handler::resolve(url, *skip_directory_listing, context),
 		Op::ReadDirectory { url } => handler::read_directory(url, context),
 		Op::Locate { url } => Ok(handler::locate(url, context)),
 		Op::Agents { sid } => {
 			let session = routes::locate_session(&Locator::Prefix(sid.clone()), context)?;
-			Ok(Reply::Rows { rows: transcript_tree(&session)? })
+			Ok(Reply::Rows { rows: transcript_tree(&session)?.iter().map(TranscriptRow::to_value).collect() })
 		}
 		Op::Events { sid, agent, types, offset, limit } => {
 			let session = routes::locate_session(&Locator::Prefix(sid.clone()), context)?;
@@ -73,40 +111,64 @@ pub fn handle(request: &Request) -> Result<Reply> {
 }
 
 /// Canonical session:// URL of a transcript.
-fn transcript_url(sid: &str, agent: &str) -> String {
+pub fn transcript_url(sid: &str, agent: &str) -> String {
 	if agent.is_empty() { format!("session://{sid}") } else { format!("session://{sid}/agents/{agent}") }
 }
 
-/// One transcript row: `{sid, agent, parent, file, bytes, modified}` with its size and mtime now.
-fn transcript_row(sid: &str, agent: &str, parent: Option<&str>, file: &Path) -> Result<Value> {
-	let stat = std::fs::metadata(file).map_err(|error| EngineError::io(file, &error))?;
-	let modified = stat
-		.modified()
-		.ok()
-		.and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-		.map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX));
-	let mut row = Obj::new();
-	row.insert("sid", Value::Str(sid.to_owned()));
-	row.insert("agent", Value::Str(agent.to_owned()));
-	row.insert("parent", parent.map_or(Value::Null, |parent| Value::Str(parent.to_owned())));
-	row.insert("file", Value::Str(file.to_string_lossy().into_owned()));
-	row.insert("bytes", Value::Num(stat.len() as f64));
-	row.insert("modified", Value::Str(time::iso_utc(modified)));
-	Ok(Value::Obj(row))
+/// One transcript of a session: the root (`agent` empty) or a subagent, with
+/// its size and mtime when it was listed.
+pub struct TranscriptRow {
+	pub sid: String,
+	pub agent: String,
+	/// The parent transcript's agent id (empty for the root); None for the root itself.
+	pub parent: Option<String>,
+	pub file: PathBuf,
+	pub bytes: u64,
+	/// ISO-8601 UTC mtime.
+	pub modified: String,
+}
+
+impl TranscriptRow {
+	fn of(sid: &str, agent: &str, parent: Option<&str>, file: PathBuf) -> Result<Self> {
+		let stat = std::fs::metadata(&file).map_err(|error| EngineError::io(&file, &error))?;
+		let modified = stat
+			.modified()
+			.ok()
+			.and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+			.map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX));
+		Ok(Self {
+			sid: sid.to_owned(),
+			agent: agent.to_owned(),
+			parent: parent.map(str::to_owned),
+			file,
+			bytes: stat.len(),
+			modified: time::iso_utc(modified),
+		})
+	}
+
+	/// The `agents` row `{sid, agent, parent, file, bytes, modified}`.
+	pub fn to_value(&self) -> Value {
+		let mut row = Obj::new();
+		row.insert("sid", Value::Str(self.sid.clone()));
+		row.insert("agent", Value::Str(self.agent.clone()));
+		row.insert("parent", self.parent.as_ref().map_or(Value::Null, |parent| Value::Str(parent.clone())));
+		row.insert("file", Value::Str(self.file.to_string_lossy().into_owned()));
+		row.insert("bytes", Value::Num(self.bytes as f64));
+		row.insert("modified", Value::Str(self.modified.clone()));
+		Value::Obj(row)
+	}
 }
 
 /// The root transcript and every subagent below it, parents before children.
-fn transcript_tree(session: &routes::SessionRef) -> Result<Vec<Value>> {
-	let mut queue: Vec<(String, PathBuf)> = vec![(String::new(), session.file.clone())];
-	let mut rows = vec![transcript_row(&session.sid, "", None, &session.file)?];
+pub fn transcript_tree(session: &routes::SessionRef) -> Result<Vec<TranscriptRow>> {
+	let mut rows = vec![TranscriptRow::of(&session.sid, "", None, session.file.clone())?];
 	let mut index = 0;
-	while index < queue.len() {
-		let (parent, file) = queue[index].clone();
+	while index < rows.len() {
+		let (parent, file) = (rows[index].agent.clone(), rows[index].file.clone());
 		index += 1;
 		for agent in routes::child_agents(&file) {
 			let child = routes::child_dir(&file).join(format!("{agent}.jsonl"));
-			rows.push(transcript_row(&session.sid, &agent, Some(&parent), &child)?);
-			queue.push((agent, child));
+			rows.push(TranscriptRow::of(&session.sid, &agent, Some(&parent), child)?);
 		}
 	}
 	Ok(rows)

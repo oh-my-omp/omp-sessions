@@ -10,6 +10,7 @@
 
 use std::fmt::Write as _;
 
+use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 /// A string longer than its capture cap: the captured prefix plus the full measure.
@@ -251,12 +252,37 @@ pub fn stringify(value: &Value, gap: Option<&str>) -> String {
 	out
 }
 
+/// `JSON.stringify(obj)` with the top-level key `skip` left out (a replacer
+/// that drops one property of the root object).
+pub fn stringify_without(obj: &Obj, skip: &str) -> String {
+	let mut out = String::from("{");
+	let mut first = true;
+	for (key, item) in obj.iter() {
+		if key == skip {
+			continue;
+		}
+		if !first {
+			out.push(',');
+		}
+		first = false;
+		write_string(&mut out, key);
+		out.push(':');
+		write_value(&mut out, item, None, 1);
+	}
+	out.push('}');
+	out
+}
+
 /// Wire form of a value (protocol rows): the same shape `stringify` writes.
 impl Serialize for Value {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		match self {
 			Value::Null => serializer.serialize_unit(),
 			Value::Bool(flag) => serializer.serialize_bool(*flag),
+			// `JSON.stringify` writes an integral number without a fraction (`42`, not `42.0`).
+			Value::Num(number) if number.fract() == 0.0 && number.abs() < 9_007_199_254_740_992.0 => {
+				serializer.serialize_i64(*number as i64)
+			}
 			Value::Num(number) => serializer.serialize_f64(*number),
 			Value::Str(text) => serializer.serialize_str(text),
 			Value::Clipped(clipped) => serializer.serialize_str(&clipped.marked()),
@@ -275,6 +301,77 @@ impl Serialize for Value {
 				map.end()
 			}
 		}
+	}
+}
+
+/// A request value as `JSON.parse` reads it: every number an f64, object keys
+/// in JavaScript's property order (array-index keys first, a repeated key
+/// keeping its first position and its last value).
+impl<'de> Deserialize<'de> for Value {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		struct ValueVisitor;
+
+		impl<'de> Visitor<'de> for ValueVisitor {
+			type Value = Value;
+
+			fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+				formatter.write_str("a JSON value")
+			}
+
+			fn visit_unit<E>(self) -> Result<Value, E> {
+				Ok(Value::Null)
+			}
+
+			fn visit_none<E>(self) -> Result<Value, E> {
+				Ok(Value::Null)
+			}
+
+			fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+				Value::deserialize(deserializer)
+			}
+
+			fn visit_bool<E>(self, flag: bool) -> Result<Value, E> {
+				Ok(Value::Bool(flag))
+			}
+
+			fn visit_i64<E>(self, number: i64) -> Result<Value, E> {
+				Ok(Value::Num(number as f64))
+			}
+
+			fn visit_u64<E>(self, number: u64) -> Result<Value, E> {
+				Ok(Value::Num(number as f64))
+			}
+
+			fn visit_f64<E>(self, number: f64) -> Result<Value, E> {
+				Ok(Value::Num(number))
+			}
+
+			fn visit_str<E>(self, text: &str) -> Result<Value, E> {
+				Ok(Value::Str(text.to_owned()))
+			}
+
+			fn visit_string<E>(self, text: String) -> Result<Value, E> {
+				Ok(Value::Str(text))
+			}
+
+			fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+				let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+				while let Some(item) = seq.next_element()? {
+					items.push(item);
+				}
+				Ok(Value::Arr(items))
+			}
+
+			fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+				let mut obj = Obj::new();
+				while let Some((key, item)) = map.next_entry::<String, Value>()? {
+					obj.insert(key, item);
+				}
+				Ok(Value::Obj(obj))
+			}
+		}
+
+		deserializer.deserialize_any(ValueVisitor)
 	}
 }
 
@@ -316,9 +413,21 @@ mod tests {
 	}
 
 	#[test]
+	fn wire_numbers_keep_integers_integral() {
+		let value = Value::Arr(vec![Value::Num(42.0), Value::Num(-0.0), Value::Num(1.5), Value::Num(9_007_199_254_740_991.0), Value::Num(f64::NAN)]);
+		assert_eq!(serde_json::to_string(&value).unwrap(), "[42,0,1.5,9007199254740991,null]");
+	}
+
+	#[test]
 	fn pretty_layout_matches_json_stringify_with_two_spaces() {
 		let value = obj(&[("a", Value::Arr(vec![Value::Num(1.0), Value::Obj(Obj::new())])), ("b", Value::Arr(vec![]))]);
 		assert_eq!(stringify(&value, Some("  ")), "{\n  \"a\": [\n    1,\n    {}\n  ],\n  \"b\": []\n}");
+	}
+
+	#[test]
+	fn parsing_keeps_javascript_key_order() {
+		let value: Value = serde_json::from_str(r#"{"b":1,"10":[true,null],"a":"x","b":2.5}"#).unwrap();
+		assert_eq!(stringify(&value, None), r#"{"10":[true,null],"b":2.5,"a":"x"}"#);
 	}
 
 	#[test]
