@@ -6,6 +6,7 @@
       "name": "omp-sessions",
       "devDependencies": {
         "@biomejs/biome": "latest",
+        "@oh-my-pi/omptype": "latest",
         "@oh-my-pi/pi-coding-agent": "latest",
         "@oh-my-pi/pi-natives": "latest",
         "@oh-my-pi/pi-utils": "latest",
@@ -13,6 +14,7 @@
         "typescript": "latest",
       },
       "peerDependencies": {
+        "@oh-my-pi/omptype": "*",
         "@oh-my-pi/pi-coding-agent": "*",
         "@oh-my-pi/pi-natives": "*",
         "@oh-my-pi/pi-utils": "*",

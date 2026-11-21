@@ -29,12 +29,14 @@
 		"test": "bun test && bun scripts/engine.ts test"
 	},
 	"peerDependencies": {
+		"@oh-my-pi/omptype": "*",
 		"@oh-my-pi/pi-coding-agent": "*",
 		"@oh-my-pi/pi-natives": "*",
 		"@oh-my-pi/pi-utils": "*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "latest",
+		"@oh-my-pi/omptype": "latest",
 		"@oh-my-pi/pi-coding-agent": "latest",
 		"@oh-my-pi/pi-natives": "latest",
 		"@oh-my-pi/pi-utils": "latest",
