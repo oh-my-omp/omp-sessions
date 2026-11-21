@@ -5,13 +5,13 @@
 - **`session://` scheme（对 `~/.omp/agent/sessions` 的 read、grep、glob）**
   - scheme 注册 — 功能：在 omp 进程级内部 URL 路由里注册只读的 `session` scheme，主会话、子代理和轻量模式都能用；不替换 omp 自有的 scheme 或其他所有者的处理器。时机：扩展加载时一次。实例：冲突时 omp 日志写 `omp-sessions: <reason>`。
   - URL 语法 — 功能：完整的 `session://` 语法收在 omp 自己的 URL 说明里，系统提示词中 `session://` 那一行指向它。时机：模型读取时。实例：`read xd://read/urls`。
-  - 找会话 — 功能：列项目和会话、搜索 prompt、取 recap 都用 omp 的 `archive` eval 全局；它给出的会话 id 可以直接用在任何 `session://` URL 里，也可以作为 `session_query` 的 `sid`。omp-sessions 自己不再提供搜索或列表路由。时机：在 eval 单元里。实例：`archive.sessions({ project: "*", limit: 5 })`、`archive.recaps({ project: "*" })`。
+  - 找会话 — 功能：列项目和会话、搜索 prompt、取 recap 都用 omp 的 `archive` eval 全局；它给出的会话 id 可以直接用在任何 `session://` URL 里，也可以作为 `session_query` 的 `sid`。`session://find` 与各个 `sessions.jsonl` 路由已删除，prompt 搜索、标题和 recap 只在 `archive` 里。时机：在 eval 单元里。实例：`archive.sessions({ project: "*", limit: 5 })`、`archive.recaps({ project: "*" })`。
   - 时间线 — 功能：渲染会话的活动分支：user、developer、thinking、助手文本、IRC、任务派发和子代理结果完整显示，其他工具调用各占一行 `tool(args) status #<result entry> // intent`。时机：读取该 URL 时。实例：`session://01a1f4a1/timeline`。
   - 条目、事件和原文件 — 功能：完整显示单个条目、以 JSONL 给出同样的事件，或返回会话文件本身。时机：读取该 URL 时。实例：`session://01a1/entry/<id>`、`session://01a1/events.jsonl`、`session://01a1/raw.jsonl`。
   - 子代理、artifact 和 local 文件 — 功能：为每个子代理重复同一棵树，并暴露该会话的 `artifact://` 和 `local://`。时机：读取该 URL 时。实例：`session://01a1/agents/ReadmePeers/timeline`、`session://01a1/artifacts/4`、`session://01a1/local/readme-contract.md`。
   - 过滤与 jq — 功能：按事件类型、分组、`call:<tool>`、`marker:<what>` 或排除项以及时间窗口过滤 `timeline` 和 `events.jsonl`，并用 `?q=` 对 `events.jsonl` 运行 jq。时机：URL 带查询参数时。实例：`session://01a1/timeline?type=thinking,irc&since=2h`、`session://01a1/events.jsonl?q=<jq>`。
   - grep 树 — 功能：给 `grep`/`glob` 提供一棵可遍历的树，当前项目别名为 `session://here/…`，`session://type/<filter>/<path>` 是经得起 glob 的过滤写法。时机：`grep` 或 `glob` 遍历 `session://` 路径时。实例：对 `session://here/2026-11-20/*/timeline` 执行 `grep`；`session://projects/<bucket>/<YYYY-MM-DD>/<full-id>/agents/<AgentId>/timeline`。
-  - 读进程 — 功能：每次读取启动一个 Rust 引擎 `omp-sessions-engine` 进程，由它解析 URL 用到的会话文件、返回渲染好的文本后退出；omp 里只留下这段文本。时机：每次 `session://` 的 read、`grep`、`glob`。实例：每个请求在 omp 日志里留下一行 `omp-sessions engine`，带 `op`、`ms`、`transcripts`、`bytes`、`cache` 与 `peakRssBytes`。
+  - 读进程 — 功能：每次读取启动一个 Rust 引擎 `omp-sessions-engine` 进程，由它解析 URL 用到的会话文件、返回渲染好的文本后退出；omp 里只留下这段文本。时机：每次 `session://` 的 read、`grep`、`glob`，以及每次 `session_query` 的 `agents`、`events` 调用。实例：每个请求在 omp 日志里留下一行 `omp-sessions engine`，带 `op`、`ms`、`transcripts`、`bytes`、`cache` 与 `peakRssBytes`。
 - **`session_query` 工具（用 JS/Python 和 SQL 查同一份历史）**
   - 工具注册与启用 — 功能：以未启用状态注册 `session_query`，再经 `applyActiveTools` 按规范顺序启用（内置工具按注册表顺序在前，其余按名称），使基础 system prompt 在 `/restart` 前后不变。时机：加载时注册；`session_start` 时启用。实例：eval 单元里 `(await tool.session_query({ action: "agents", sid: "01a1" })).details`。
   - `agents` / `events` action — 功能：返回一个会话的对话树，或一份对话活动分支事件的一页。时机：eval 单元调用该 action 时。实例：`tool.session_query({ action: "agents", sid: "01a1" })` → 行 `sid agent parent file bytes modified`。
