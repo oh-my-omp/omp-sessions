@@ -1,0 +1,75 @@
+name: engine-assets
+
+on:
+  workflow_call:
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: main
+      - uses: oven-sh/setup-bun@main
+        with:
+          bun-version: latest
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/engine.ts plan >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.tag != ''
+    strategy:
+      matrix:
+        include:
+          - { target: darwin-arm64, runner: macos-latest }
+          - { target: darwin-x64, runner: macos-26-intel }
+          - { target: linux-x64, runner: ubuntu-latest }
+          - { target: linux-arm64, runner: ubuntu-24.04-arm }
+          - { target: win32-x64, runner: windows-latest }
+          - { target: win32-arm64, runner: windows-11-arm }
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@main
+        with:
+          bun-version: latest
+      - run: bun scripts/engine.ts artifact ${{ matrix.target }} engine-assets
+      - uses: actions/upload-artifact@main
+        with:
+          name: engine-${{ matrix.target }}
+          path: engine-assets/
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@main
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+      - uses: oven-sh/setup-bun@main
+        with:
+          bun-version: latest
+      - uses: actions/download-artifact@main
+        with:
+          pattern: engine-*
+          merge-multiple: true
+          path: engine-assets
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/engine.ts publish ${{ needs.plan.outputs.tag }} engine-assets

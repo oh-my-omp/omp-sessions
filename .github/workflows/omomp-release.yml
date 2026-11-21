@@ -38,3 +38,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bun ../omomp-shared/release.ts --github-release "$GITHUB_REPOSITORY"
+
+  engine:
+    needs: release
+    uses: ./.github/workflows/engine-assets.yml

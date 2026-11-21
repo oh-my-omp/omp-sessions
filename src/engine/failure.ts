@@ -5,7 +5,7 @@ import type { ErrorKind } from "./protocol.ts";
 /** Every kind a `session://` read or a `session_query` call can fail with. */
 export type FailureKind = ErrorKind | "engine_unavailable" | "engine_exited";
 
-/** Why the shell has no engine binary to run (decision §6). */
+/** Why the shell has no engine binary to run (decision §18). */
 export type UnavailableReason = "unsupported_platform" | "download_failed" | "digest_mismatch" | "not_built";
 
 export class EngineFailure extends Error {
