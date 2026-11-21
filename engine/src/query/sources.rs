@@ -431,23 +431,34 @@ fn transcript_rows(cache: Option<&Cache>, transcript: &TranscriptRow, wants_even
 	Ok(TranscriptRows { transcript: row, events })
 }
 
-/// Transcripts a worker may have taken beyond the one the appender waits for.
-const LOAD_WINDOW_PER_WORKER: usize = 4;
+/// Source bytes of the transcripts a worker may have taken, from the one the
+/// appender waits for through its own.
+const LOAD_WINDOW_BYTES: u64 = 1 << 30;
 
 /// Loads `transcripts` on one worker per core and hands each one's rows to
 /// `append` in list order, on the calling thread (the one owning DuckDB). A
-/// worker takes the next transcript only while it lies within the window past
-/// the one `append` waits for, so at most that many transcripts' rows are held.
+/// worker takes a transcript past the one `append` waits for only while the
+/// source bytes from that one through its own stay within `window_bytes`, so
+/// the rows held follow the bytes loaded, and workers build several large
+/// transcripts at once instead of waiting behind one. The transcript `append`
+/// waits for is always taken, however large.
 /// The first failure, in list order, stops the workers and is returned.
 fn load_in_order(
 	cache: Option<&Cache>,
 	transcripts: &[TranscriptRow],
 	wants_events: bool,
 	cancel: &Cancel,
+	window_bytes: u64,
 	mut append: impl FnMut(TranscriptRows) -> Result<()>,
 ) -> Result<()> {
 	let workers = std::thread::available_parallelism().map_or(1, NonZeroUsize::get).min(transcripts.len()).max(1);
-	let window = workers * LOAD_WINDOW_PER_WORKER;
+	// `ends[i]` is the source bytes of transcripts `0..i`.
+	let ends: Vec<u64> = std::iter::once(0)
+		.chain(transcripts.iter().scan(0u64, |total, transcript| {
+			*total += transcript.bytes;
+			Some(*total)
+		}))
+		.collect();
 	let now = time::now_ms();
 	let next = AtomicUsize::new(0);
 	let stop = AtomicBool::new(false);
@@ -458,14 +469,14 @@ fn load_in_order(
 	std::thread::scope(|scope| {
 		for _ in 0..workers {
 			let sender = sender.clone();
-			let (next, stop, appended, moved) = (&next, &stop, &appended, &moved);
+			let (next, stop, appended, moved, ends) = (&next, &stop, &appended, &moved, &ends);
 			scope.spawn(move || {
 				loop {
 					let index = next.fetch_add(1, Ordering::Relaxed);
 					let Some(transcript) = transcripts.get(index) else { return };
 					{
 						let mut waited = appended.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-						while index >= *waited + window && !stop.load(Ordering::Relaxed) {
+						while index > *waited && ends[index + 1] - ends[*waited] > window_bytes && !stop.load(Ordering::Relaxed) {
 							waited = moved.wait(waited).unwrap_or_else(std::sync::PoisonError::into_inner);
 						}
 					}
@@ -555,7 +566,7 @@ fn session_relations(duck: &Duck, selection: &Selection, needed: &Needed, contex
 	}
 	if transcripts_table.is_some() || events_table.is_some() {
 		let cache = Cache::of(context)?;
-		load_in_order(cache.as_ref(), &transcripts, events_table.is_some(), cancel, |rows| {
+		load_in_order(cache.as_ref(), &transcripts, events_table.is_some(), cancel, LOAD_WINDOW_BYTES, |rows| {
 			if let Some(table) = transcripts_table.as_mut() {
 				table.row(rows.transcript, cancel)?;
 			}
@@ -708,5 +719,41 @@ mod tests {
 		assert_eq!(merge_type(merge_type(None, &int), &Value::Str("a".into())), Some(ColumnType::Json));
 		assert_eq!(merge_type(merge_type(None, &Value::Null), &Value::Bool(true)), Some(ColumnType::Boolean));
 		assert_eq!(value_type(&Value::Num(9_007_199_254_740_992.0)), Some(ColumnType::Double));
+	}
+
+	#[test]
+	fn rows_reach_append_in_list_order_while_workers_wait_on_the_window() {
+		let dir = std::env::temp_dir().join(format!("omp-sessions-load-order-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		// Transcript i holds i + 1 user messages on one branch; its listed size
+		// makes some workers wait behind a large head and others behind small ones.
+		let sizes = [5u64, 1, 1, 4, 1, 1, 1, 6, 1, 2, 1, 1];
+		let transcripts: Vec<TranscriptRow> = sizes
+			.iter()
+			.enumerate()
+			.map(|(i, &bytes)| {
+				let file = dir.join(format!("A{i}.jsonl"));
+				let mut text = String::from("{\"type\":\"session\",\"id\":\"s\",\"timestamp\":\"2026-11-01T10:00:00.000Z\",\"cwd\":\"/w\"}\n");
+				for m in 0..=i {
+					let parent = if m == 0 { "null".to_owned() } else { format!("\"m{}\"", m - 1) };
+					text.push_str(&format!(
+						"{{\"type\":\"message\",\"id\":\"m{m}\",\"parentId\":{parent},\"timestamp\":\"2026-11-01T10:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"
+					));
+				}
+				std::fs::write(&file, text).unwrap();
+				TranscriptRow { sid: "s".into(), agent: format!("A{i}"), parent: Some(String::new()), file, bytes, modified: String::new() }
+			})
+			.collect();
+		let cancel = Cancel { control: std::sync::Arc::new(super::super::Control::default()), id: 1 };
+		let mut seen: Vec<(String, usize)> = Vec::new();
+		let outcome = load_in_order(None, &transcripts, true, &cancel, 3, |rows| {
+			let Cell::Str(agent) = &rows.transcript[1] else { panic!("agent cell") };
+			seen.push((agent.clone(), rows.events.len()));
+			Ok(())
+		});
+		std::fs::remove_dir_all(&dir).unwrap();
+		outcome.unwrap();
+		let expected: Vec<(String, usize)> = (0..sizes.len()).map(|i| (format!("A{i}"), i + 1)).collect();
+		assert_eq!(seen, expected);
 	}
 }
