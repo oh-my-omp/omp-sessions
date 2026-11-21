@@ -1,12 +1,14 @@
-// Query processes (decision §3): one per omp session, started by its first
+// Query processes (decisions §3, §17): one per omp session, started by its first
 // `sql` or `export` call, holding the DuckDB database whose `main` keeps the
 // caller's tables, views and macros between calls. It ends at session_switch,
 // session_shutdown, or when a call arrives under another session id: the shell
 // cancels what is still running, closes stdin, and terminates the process tree
 // if it has not exited within 5 s. Calls run in arrival order in the engine;
 // an aborted call sends a `cancel` frame and the engine answers it `aborted`.
-// A process that exits unexpectedly fails its in-flight calls, and the next
-// call, with `engine_exited`; the call after that starts a new process.
+// A process that exits unexpectedly fails its in-flight calls with
+// `engine_exited`, and the next call starts a new process; when no call was in
+// flight, the next call fails with `engine_exited` and the one after it starts
+// a new process.
 import { ptree } from "@oh-my-pi/pi-utils";
 import { engineBinary } from "./binary.ts";
 import { aborted, EngineFailure } from "./failure.ts";
