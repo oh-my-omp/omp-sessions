@@ -252,10 +252,10 @@ pub fn stringify(value: &Value, gap: Option<&str>) -> String {
 	out
 }
 
-/// `JSON.stringify(obj)` with the top-level key `skip` left out (a replacer
-/// that drops one property of the root object).
-pub fn stringify_without(obj: &Obj, skip: &str) -> String {
-	let mut out = String::from("{");
+/// Appends `JSON.stringify(obj)` with the top-level key `skip` left out (a
+/// replacer that drops one property of the root object) to `out`.
+pub fn write_without(out: &mut String, obj: &Obj, skip: &str) {
+	out.push('{');
 	let mut first = true;
 	for (key, item) in obj.iter() {
 		if key == skip {
@@ -265,12 +265,11 @@ pub fn stringify_without(obj: &Obj, skip: &str) -> String {
 			out.push(',');
 		}
 		first = false;
-		write_string(&mut out, key);
+		write_string(out, key);
 		out.push(':');
-		write_value(&mut out, item, None, 1);
+		write_value(out, item, None, 1);
 	}
 	out.push('}');
-	out
 }
 
 /// Wire form of a value (protocol rows): the same shape `stringify` writes.

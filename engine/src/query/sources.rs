@@ -8,6 +8,7 @@
 //!   src.events       the active-branch events of every transcript (the events.jsonl records)
 //! Rows passed in `tables` become `src.<name>`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,7 +18,7 @@ use regex::Regex;
 
 use super::{Cancel, failed};
 use crate::cache::Cache;
-use crate::duck::{Appender, Duck, Scalar};
+use crate::duck::{Appender, ColumnSlice, Duck, Scalar};
 use crate::error::{EngineError, Result};
 use crate::filter::{self, FilteredRead};
 use crate::info;
@@ -65,36 +66,135 @@ pub fn identifier(value: &str) -> String {
 	format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+/// Which `src.events` columns a call fills, in `EVENTS` order; the others hold
+/// NULL. A call's SQL cannot tell a column it does not reach from a filled one.
+type EventColumns = [bool; EVENTS.len()];
+
+const EVERY_EVENT_COLUMN: EventColumns = [true; EVENTS.len()];
+
 /// The relations a call's `src` must hold.
 enum Needed {
 	All,
-	Some(HashSet<&'static str>),
+	/// The relations the SQL names, and the `src.events` columns it reaches.
+	Some { relations: HashSet<&'static str>, event_columns: EventColumns },
 }
 
 impl Needed {
 	fn has(&self, name: &str) -> bool {
 		match self {
 			Needed::All => true,
-			Needed::Some(names) => names.contains(name),
+			Needed::Some { relations, .. } => relations.contains(name),
 		}
 	}
 
 	fn is_empty(&self) -> bool {
-		matches!(self, Needed::Some(names) if names.is_empty())
+		matches!(self, Needed::Some { relations, .. } if relations.is_empty())
+	}
+
+	fn event_columns(&self) -> EventColumns {
+		match self {
+			Needed::All => EVERY_EVENT_COLUMN,
+			Needed::Some { event_columns, .. } => *event_columns,
+		}
 	}
 }
 
-/// The `src` relations one query's parse tree names, or `All` when that tree does
-/// not name them: a statement DuckDB cannot serialize to a tree (anything but a
-/// SELECT, so a CTAS included), a parse error, a reference resolved at run time
-/// (a table function or a `SHOW`, whose relation names the tree lacks), or a
-/// catalog relation (whose rows list the relations in `src`).
+/// What a walk over one query's parse tree has found.
+#[derive(Default)]
+struct References {
+	relations: HashSet<&'static str>,
+	/// The names `src.events` goes by in the query: `events` and each alias.
+	event_names: HashSet<String>,
+	/// The last part of every column reference (`e.text` gives `text`), lowercased.
+	columns: HashSet<String>,
+	/// A reference that reaches columns without naming them: `*`, `COLUMNS(…)`,
+	/// a positional `#n`, a natural join, a PIVOT or UNPIVOT, or `src.events`
+	/// with its columns renamed (`e(c1, …)`).
+	unnamed_columns: bool,
+}
+
+impl References {
+	/// Walks `node`; false when the tree cannot name the relations it reads.
+	fn walk(&mut self, node: &serde_json::Value) -> bool {
+		match node {
+			serde_json::Value::Array(items) => items.iter().all(|item| self.walk(item)),
+			serde_json::Value::Object(fields) => {
+				let text = |name: &str| fields.get(name).and_then(serde_json::Value::as_str);
+				match text("type") {
+					Some("TABLE_FUNCTION" | "SHOW_REF") => return false,
+					Some("BASE_TABLE") => {
+						let field = |name: &str| text(name).unwrap_or("").to_lowercase();
+						let (schema, table) = (field("schema_name"), field("table_name"));
+						if CATALOG_SCHEMA.is_match(&schema) || CATALOG_RELATION.is_match(&table) {
+							return false;
+						}
+						if schema == "src"
+							&& let Some(name) = SOURCE_RELATIONS.iter().find(|name| **name == table)
+						{
+							self.relations.insert(*name);
+							if *name == "events" {
+								let alias = field("alias");
+								if !alias.is_empty() {
+									self.event_names.insert(alias);
+								}
+								self.event_names.insert(table);
+								// `src.events e(c1, …)` renames columns by position, so references no longer carry their names.
+								let renamed = fields.get("column_name_alias").and_then(serde_json::Value::as_array).is_some_and(|names| !names.is_empty());
+								if renamed {
+									self.unnamed_columns = true;
+								}
+							}
+						}
+					}
+					Some("COLUMN_REF") => {
+						match fields.get("column_names").and_then(serde_json::Value::as_array).and_then(|names| names.last()).and_then(serde_json::Value::as_str)
+						{
+							Some(name) => {
+								self.columns.insert(name.to_lowercase());
+							}
+							None => self.unnamed_columns = true,
+						}
+					}
+					Some("STAR" | "POSITIONAL_REFERENCE" | "PIVOT") => self.unnamed_columns = true,
+					Some("JOIN") => {
+						if text("ref_type") == Some("NATURAL") {
+							self.unnamed_columns = true;
+						}
+						let using = fields.get("using_columns").and_then(serde_json::Value::as_array).into_iter().flatten();
+						self.columns.extend(using.filter_map(serde_json::Value::as_str).map(str::to_lowercase));
+					}
+					_ => {}
+				}
+				fields.values().all(|value| self.walk(value))
+			}
+			_ => true,
+		}
+	}
+
+	/// The `src.events` columns the query reaches: every one when a reference
+	/// does not name its columns or names the whole row (`hash(e)`, `e` being
+	/// the table's alias), else the ones it names.
+	fn event_columns(&self) -> EventColumns {
+		if self.unnamed_columns || self.columns.iter().any(|name| self.event_names.contains(name)) {
+			return EVERY_EVENT_COLUMN;
+		}
+		EVENTS.map(|(name, _)| self.columns.contains(name))
+	}
+}
+
+/// The `src` relations one query's parse tree names and the `src.events`
+/// columns it reaches, or `All` when that tree does not name its relations: a
+/// statement DuckDB cannot serialize to a tree (anything but a SELECT, so a
+/// CTAS included), a parse error, a reference resolved at run time (a table
+/// function or a `SHOW`, whose relation names the tree lacks), or a catalog
+/// relation (whose rows list the relations in `src`).
 ///
 /// The tree is DuckDB's own parse (`json_serialize_sql`), so quoted, commented,
 /// spaced, catalog-qualified, CTE and subquery references arrive as the
-/// `schema_name`/`table_name` they denote; the walk covers every node rather than
-/// recognized shapes. A parse error is not reported from here: the query's own
-/// run reports it.
+/// `schema_name`/`table_name` and `column_names` they denote; the walk covers
+/// every node rather than recognized shapes, and a column name found anywhere
+/// counts for `src.events`. A parse error is not reported from here: the
+/// query's own run reports it.
 fn parse_references(duck: &Duck, sql: &str) -> Needed {
 	let Ok(rows) = duck.strings("SELECT json_serialize_sql(?)", &[Scalar::Str(sql.to_owned())]) else { return Needed::All };
 	let Some(Some(text)) = rows.into_iter().next() else { return Needed::All };
@@ -103,38 +203,14 @@ fn parse_references(duck: &Duck, sql: &str) -> Needed {
 		return Needed::All;
 	}
 	let Some(statements) = tree.get("statements").and_then(serde_json::Value::as_array) else { return Needed::All };
-	let mut names = HashSet::new();
-	fn walk(node: &serde_json::Value, names: &mut HashSet<&'static str>) -> bool {
-		match node {
-			serde_json::Value::Array(items) => items.iter().all(|item| walk(item, names)),
-			serde_json::Value::Object(fields) => {
-				let kind = fields.get("type").and_then(serde_json::Value::as_str);
-				if kind == Some("TABLE_FUNCTION") || kind == Some("SHOW_REF") {
-					return false;
-				}
-				if kind == Some("BASE_TABLE") {
-					let field = |name: &str| fields.get(name).and_then(serde_json::Value::as_str).unwrap_or("").to_lowercase();
-					let (schema, table) = (field("schema_name"), field("table_name"));
-					if CATALOG_SCHEMA.is_match(&schema) || CATALOG_RELATION.is_match(&table) {
-						return false;
-					}
-					if schema == "src"
-						&& let Some(name) = SOURCE_RELATIONS.iter().find(|name| **name == table)
-					{
-						names.insert(*name);
-					}
-				}
-				fields.values().all(|value| walk(value, names))
-			}
-			_ => true,
-		}
-	}
+	let mut references = References::default();
 	for statement in statements {
-		if !walk(statement, &mut names) {
+		if !references.walk(statement) {
 			return Needed::All;
 		}
 	}
-	Needed::Some(names)
+	let event_columns = references.event_columns();
+	Needed::Some { relations: references.relations, event_columns }
 }
 
 /// The SQL of every non-internal view and macro this database holds, in every
@@ -195,10 +271,6 @@ enum Cell {
 impl Cell {
 	fn text(value: Option<String>) -> Cell {
 		value.map_or(Cell::Null, Cell::Str)
-	}
-
-	fn int(value: Option<i64>) -> Cell {
-		value.map_or(Cell::Null, Cell::Int)
 	}
 }
 
@@ -300,16 +372,156 @@ impl Table {
 		self.appender.end_row().map_err(|error| failed(error, cancel))
 	}
 
+	/// `src.events` rows built on a worker, appended a chunk at a time.
+	fn events(&mut self, rows: &EventRows, cancel: &Cancel) -> Result<()> {
+		self.appender.columns(rows.len(), &rows.columns()).map_err(|error| failed(error, cancel))
+	}
+
 	fn close(self, cancel: &Cancel) -> Result<()> {
 		self.appender.close().map_err(|error| failed(error, cancel))
 	}
 }
 
+/// A VARCHAR column of rows being built: the values back to back, where each
+/// row's value ends, and which rows are not NULL.
+#[derive(Default)]
+struct TextColumn {
+	bytes: String,
+	ends: Vec<usize>,
+	valid: Vec<bool>,
+}
+
+impl TextColumn {
+	fn push(&mut self, text: Option<&str>) {
+		if let Some(text) = text {
+			self.bytes.push_str(text);
+		}
+		self.end_row(text.is_some());
+	}
+
+	/// Ends a row whose value was written to `bytes` directly.
+	fn end_row(&mut self, valid: bool) {
+		self.ends.push(self.bytes.len());
+		self.valid.push(valid);
+	}
+
+	fn slice(&self) -> ColumnSlice<'_> {
+		ColumnSlice::Text { bytes: &self.bytes, ends: &self.ends, valid: &self.valid }
+	}
+}
+
+/// A BIGINT column of rows being built.
+#[derive(Default)]
+struct IntColumn {
+	values: Vec<i64>,
+	valid: Vec<bool>,
+}
+
+impl IntColumn {
+	fn push(&mut self, value: Option<i64>) {
+		self.values.push(value.unwrap_or(0));
+		self.valid.push(value.is_some());
+	}
+
+	fn slice(&self) -> ColumnSlice<'_> {
+		ColumnSlice::Int { values: &self.values, valid: &self.valid }
+	}
+}
+
+/// One transcript's `src.events` rows, column by column, built on a worker so
+/// the thread owning DuckDB only hands whole chunks to the appender. Columns
+/// outside `wanted` hold NULL.
+#[derive(Default)]
+struct EventRows {
+	wanted: EventColumns,
+	sid: TextColumn,
+	agent: TextColumn,
+	seq: IntColumn,
+	turn: IntColumn,
+	t: TextColumn,
+	kind: TextColumn,
+	entry: TextColumn,
+	block: IntColumn,
+	line: IntColumn,
+	call_id: TextColumn,
+	tool: TextColumn,
+	status: TextColumn,
+	result_entry: TextColumn,
+	text: TextColumn,
+	data: TextColumn,
+	url: TextColumn,
+}
+
+impl EventRows {
+	fn new(wanted: EventColumns) -> Self {
+		EventRows { wanted, ..EventRows::default() }
+	}
+
+	fn len(&self) -> usize {
+		self.seq.values.len()
+	}
+
+	/// One row. The text column shows `text`, else `source`; `data` holds the
+	/// record without exactly that field, so no text lives in the table twice.
+	fn push(&mut self, transcript: &TranscriptRow, seq: usize, record: &Obj) {
+		let [sid, agent, seq_column, turn, t, kind, entry, block, line, call_id, tool, status, result_entry, text, data, url] = self.wanted;
+		let text_at = |wanted: bool, key: &str| if wanted { text_of(record, key) } else { None };
+		let int_at = |wanted: bool, key: &str| if wanted { int_of(record, key) } else { None };
+		// The shown text and the field it came from.
+		let shown = if text || data {
+			text_of(record, "text").map(|value| (value, "text")).or_else(|| text_of(record, "source").map(|value| (value, "source")))
+		} else {
+			None
+		};
+		self.sid.push(sid.then_some(transcript.sid.as_str()));
+		self.agent.push(agent.then_some(transcript.agent.as_str()));
+		self.seq.push(seq_column.then_some(seq as i64));
+		self.turn.push(int_at(turn, "turn"));
+		self.t.push(text_at(t, "t").as_deref());
+		self.kind.push(text_at(kind, "kind").as_deref());
+		self.entry.push(text_at(entry, "entry").as_deref());
+		self.block.push(int_at(block, "block"));
+		self.line.push(int_at(line, "line"));
+		self.call_id.push(text_at(call_id, "callId").as_deref());
+		self.tool.push(text_at(tool, "tool").as_deref());
+		self.status.push(text_at(status, "status").as_deref());
+		self.result_entry.push(text_at(result_entry, "resultEntry").as_deref());
+		self.text.push(shown.as_ref().filter(|_| text).map(|(value, _)| value.as_ref()));
+		if data {
+			json::write_without(&mut self.data.bytes, record, shown.as_ref().map_or("", |(_, field)| field));
+		}
+		self.data.end_row(data);
+		self.url.push(text_at(url, "url").as_deref());
+	}
+
+	/// The columns in `EVENTS` order.
+	fn columns(&self) -> [ColumnSlice<'_>; 16] {
+		[
+			self.sid.slice(),
+			self.agent.slice(),
+			self.seq.slice(),
+			self.turn.slice(),
+			self.t.slice(),
+			self.kind.slice(),
+			self.entry.slice(),
+			self.block.slice(),
+			self.line.slice(),
+			self.call_id.slice(),
+			self.tool.slice(),
+			self.status.slice(),
+			self.result_entry.slice(),
+			self.text.slice(),
+			self.data.slice(),
+			self.url.slice(),
+		]
+	}
+}
+
 /// `record[key]` when it is a string (a clipped string reads as its marked text).
-fn text_of(record: &Obj, key: &str) -> Option<String> {
+fn text_of<'a>(record: &'a Obj, key: &str) -> Option<Cow<'a, str>> {
 	match record.get(key)? {
-		Value::Str(text) => Some(text.clone()),
-		Value::Clipped(clipped) => Some(clipped.marked()),
+		Value::Str(text) => Some(Cow::Borrowed(text)),
+		Value::Clipped(clipped) => Some(Cow::Owned(clipped.marked())),
 		_ => None,
 	}
 }
@@ -320,32 +532,6 @@ fn int_of(record: &Obj, key: &str) -> Option<i64> {
 		Value::Num(number) => Some(*number as i64),
 		_ => None,
 	}
-}
-
-/// One `src.events` row. The text column shows `text`, else `source`; `data`
-/// holds the record without exactly that field, so no text lives in the table twice.
-fn event_row(transcript: &TranscriptRow, seq: usize, record: &Obj) -> Vec<Cell> {
-	let text = text_of(record, "text");
-	let source = text_of(record, "source");
-	let copied = if text.is_some() { "text" } else if source.is_some() { "source" } else { "" };
-	vec![
-		Cell::Str(transcript.sid.clone()),
-		Cell::Str(transcript.agent.clone()),
-		Cell::Int(seq as i64),
-		Cell::int(int_of(record, "turn")),
-		Cell::text(text_of(record, "t")),
-		Cell::text(text_of(record, "kind")),
-		Cell::text(text_of(record, "entry")),
-		Cell::int(int_of(record, "block")),
-		Cell::int(int_of(record, "line")),
-		Cell::text(text_of(record, "callId")),
-		Cell::text(text_of(record, "tool")),
-		Cell::text(text_of(record, "status")),
-		Cell::text(text_of(record, "resultEntry")),
-		Cell::text(text.or(source)),
-		Cell::Str(json::stringify_without(record, copied)),
-		Cell::text(text_of(record, "url")),
-	]
 }
 
 /// One `src.sessions` row from a root session file's head and tail, by the
@@ -398,23 +584,23 @@ fn entries_scan(file: &TranscriptRow) -> String {
 /// One transcript's `src.transcripts` row and, when wanted, its `src.events` rows.
 struct TranscriptRows {
 	transcript: Vec<Cell>,
-	events: Vec<Vec<Cell>>,
+	events: EventRows,
 }
 
-fn transcript_rows(cache: Option<&Cache>, transcript: &TranscriptRow, wants_events: bool, now: i64) -> Result<TranscriptRows> {
+fn transcript_rows(cache: Option<&Cache>, transcript: &TranscriptRow, event_columns: Option<EventColumns>, now: i64) -> Result<TranscriptRows> {
 	let (loaded, filter) =
 		filter::load_filtered(cache, &transcript.file, &transcript.sid, &transcript.agent, None, None, now, FilteredRead::Records)?;
 	let url = ops::transcript_url(&transcript.sid, &transcript.agent);
 	let records = render::event_records(&loaded, &url, &filter);
-	let events = if wants_events {
-		records
-			.iter()
-			.enumerate()
-			.filter_map(|(seq, record)| record.as_obj().map(|record| event_row(transcript, seq, record)))
-			.collect()
-	} else {
-		Vec::new()
-	};
+	let mut events = EventRows::default();
+	if let Some(wanted) = event_columns {
+		events = EventRows::new(wanted);
+		for (seq, record) in records.iter().enumerate() {
+			if let Some(record) = record.as_obj() {
+				events.push(transcript, seq, record);
+			}
+		}
+	}
 	let meta = &loaded.meta;
 	let row = vec![
 		Cell::Str(transcript.sid.clone()),
@@ -446,7 +632,7 @@ const LOAD_WINDOW_BYTES: u64 = 1 << 30;
 fn load_in_order(
 	cache: Option<&Cache>,
 	transcripts: &[TranscriptRow],
-	wants_events: bool,
+	event_columns: Option<EventColumns>,
 	cancel: &Cancel,
 	window_bytes: u64,
 	mut append: impl FnMut(TranscriptRows) -> Result<()>,
@@ -483,7 +669,7 @@ fn load_in_order(
 					if stop.load(Ordering::Relaxed) {
 						return;
 					}
-					let rows = cancel.check().and_then(|()| transcript_rows(cache, transcript, wants_events, now));
+					let rows = cancel.check().and_then(|()| transcript_rows(cache, transcript, event_columns, now));
 					if sender.send((index, rows)).is_err() {
 						return;
 					}
@@ -566,14 +752,13 @@ fn session_relations(duck: &Duck, selection: &Selection, needed: &Needed, contex
 	}
 	if transcripts_table.is_some() || events_table.is_some() {
 		let cache = Cache::of(context)?;
-		load_in_order(cache.as_ref(), &transcripts, events_table.is_some(), cancel, LOAD_WINDOW_BYTES, |rows| {
+		let event_columns = events_table.is_some().then(|| needed.event_columns());
+		load_in_order(cache.as_ref(), &transcripts, event_columns, cancel, LOAD_WINDOW_BYTES, |rows| {
 			if let Some(table) = transcripts_table.as_mut() {
 				table.row(rows.transcript, cancel)?;
 			}
 			if let Some(table) = events_table.as_mut() {
-				for row in rows.events {
-					table.row(row, cancel)?;
-				}
+				table.events(&rows.events, cancel)?;
 			}
 			Ok(())
 		})?;
@@ -722,6 +907,31 @@ mod tests {
 	}
 
 	#[test]
+	fn events_columns_a_query_reaches_are_filled_and_only_those() {
+		let duck = Duck::open().unwrap();
+		let filled = |sql: &str| -> Vec<&str> {
+			let columns = parse_references(&duck, sql).event_columns();
+			EVENTS.iter().zip(columns).filter(|(_, filled)| *filled).map(|((name, _), _)| *name).collect()
+		};
+		let every: Vec<&str> = EVENTS.iter().map(|(name, _)| *name).collect();
+		assert_eq!(filled("select count(distinct agent) as agents, sum(length(text)) from src.events"), ["agent", "text"]);
+		assert_eq!(filled("select e.tool from src.events e join src.transcripts t using (sid) where e.data->>'x' = 'y' order by #1"), every);
+		assert_eq!(filled("select e.tool from src.events e join src.transcripts t using (sid) where e.data->>'x' = 'y'"), ["sid", "tool", "data"]);
+		assert_eq!(filled("SELECT \"TEXT\" FROM src.\"events\""), ["text"]);
+		assert_eq!(filled("select count(*) from src.events"), Vec::<&str>::new());
+		// Whole rows, unnamed columns and statements the tree cannot name fill every column.
+		assert_eq!(filled("select sum(hash(e.rowid, e)) from src.events e"), every);
+		assert_eq!(filled("select hash(events) from src.events"), every);
+		assert_eq!(filled("select c5 from src.events e(c1, c2, c3, c4, c5)"), every);
+		assert_eq!(filled("select c1 from (select sid from src.events) t(c1)"), ["sid"]);
+		assert_eq!(filled("select * exclude (data) from src.events"), every);
+		assert_eq!(filled("select columns('t.*') from src.events"), every);
+		assert_eq!(filled("select count(*) from src.events natural join src.files"), every);
+		assert_eq!(filled("pivot src.events on kind using count(*)"), every);
+		assert_eq!(filled("create table main.x as select text from src.events"), every);
+	}
+
+	#[test]
 	fn rows_reach_append_in_list_order_while_workers_wait_on_the_window() {
 		let dir = std::env::temp_dir().join(format!("omp-sessions-load-order-{}", std::process::id()));
 		std::fs::create_dir_all(&dir).unwrap();
@@ -746,7 +956,7 @@ mod tests {
 			.collect();
 		let cancel = Cancel { control: std::sync::Arc::new(super::super::Control::default()), id: 1 };
 		let mut seen: Vec<(String, usize)> = Vec::new();
-		let outcome = load_in_order(None, &transcripts, true, &cancel, 3, |rows| {
+		let outcome = load_in_order(None, &transcripts, Some(EVERY_EVENT_COLUMN), &cancel, 3, |rows| {
 			let Cell::Str(agent) = &rows.transcript[1] else { panic!("agent cell") };
 			seen.push((agent.clone(), rows.events.len()));
 			Ok(())
