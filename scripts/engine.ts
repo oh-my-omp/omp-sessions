@@ -7,6 +7,8 @@
 //   bun scripts/engine.ts publish <tag> <dir>       upload the six assets in <dir>, then their digests.json
 //   bun scripts/engine.ts smoke <binary>            have an engine binary answer one session:// read (run by hand)
 // artifact, plan and publish are the jobs of .github/workflows/engine-assets.yml (decision §19).
+// check, protocol and test link DuckDB's prebuilt library (feature `prebuilt`, see engine/Cargo.toml);
+// build and artifact compile the bundled DuckDB that ships.
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -37,6 +39,9 @@ function cargo(args: readonly string[]): void {
 	exitOnFailure(args, run.exitCode);
 }
 
+/** The features of check, protocol and test: one set, so they share one build. */
+const DEV_FEATURES = ["--no-default-features", "--features", "prebuilt,ts"] as const;
+
 function cargoOutput(args: readonly string[]): string {
 	const run = Bun.spawnSync(argv(args), { cwd: root, stdout: "pipe", stderr: "inherit" });
 	exitOnFailure(args, run.exitCode);
@@ -52,8 +57,8 @@ function build(): void {
 }
 
 function check(): void {
-	cargo(["clippy", "--all-targets", "--features", "ts", "--quiet", "--", "-D", "warnings"]);
-	const fresh = cargoOutput(["run", "--quiet", "--features", "ts", "--bin", "protocol-ts"]);
+	cargo(["clippy", "--all-targets", ...DEV_FEATURES, "--quiet", "--", "-D", "warnings"]);
+	const fresh = cargoOutput(["run", "--quiet", ...DEV_FEATURES, "--bin", "protocol-ts"]);
 	const committed = readFileSync(PROTOCOL_TS, "utf8");
 	if (fresh !== committed) {
 		process.stderr.write(
@@ -215,7 +220,7 @@ function publish(tag: string, dir: string): void {
 }
 
 async function protocol(): Promise<void> {
-	await Bun.write(PROTOCOL_TS, cargoOutput(["run", "--quiet", "--features", "ts", "--bin", "protocol-ts"]));
+	await Bun.write(PROTOCOL_TS, cargoOutput(["run", "--quiet", ...DEV_FEATURES, "--bin", "protocol-ts"]));
 	process.stdout.write(`${path.relative(root, PROTOCOL_TS)}\n`);
 }
 
@@ -230,7 +235,7 @@ switch (command) {
 		await protocol();
 		break;
 	case "test":
-		cargo(["test", "--quiet"]);
+		cargo(["test", "--quiet", ...DEV_FEATURES]);
 		break;
 	case "artifact":
 		artifact(operand(3, "target"), operand(4, "dir"));

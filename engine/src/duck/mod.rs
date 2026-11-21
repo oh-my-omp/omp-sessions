@@ -1,5 +1,5 @@
-//! A safe layer over DuckDB's C API (`libduckdb-sys`, built from its bundled
-//! sources): one in-memory database with its connection, statement extraction
+//! A safe layer over DuckDB's C API (`libduckdb-sys`; how DuckDB is linked is a
+//! feature of `engine/Cargo.toml`): one in-memory database with its connection, statement extraction
 //! and preparation, parameter binding, streaming results, appenders and
 //! interruption, as the query process uses them. `convert` turns result
 //! vectors into JSON values; `sql_type` writes a column type as SQL.
