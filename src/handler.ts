@@ -1,397 +1,86 @@
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
-import { loadEntry } from "./events.ts";
-import { loadFiltered, parseTypeFilter, type TypeFilter } from "./filter.ts";
-import {
-	executeJsonQuery,
-	getSessionsDir,
-	type InternalResource,
-	type InternalUrl,
-	listSessions,
-	type ProtocolHandler,
-	parseJsonSelector,
-	type ResolveContext,
-	readSessionInfo,
-	type SchemeSpec,
-	type ShellFsDirEntry,
-	ShellFsFileType,
-} from "./omp-adapter.ts";
-import { README } from "./readme.ts";
-import { ALL_SESSIONS, metadata, type SessionRow, sessionRows } from "./relations.ts";
-import { eventRecords, renderEntry, renderTimeline } from "./render.ts";
-import {
-	agentFile,
-	bucketDir,
-	bucketSessions,
-	childAgents,
-	childDir,
-	localDate,
-	locateSession,
-	parseTarget,
-	type Route,
-	type SessionPath,
-	type SessionRef,
-	type Target,
-} from "./routes.ts";
-import { parseWindow, type WindowSpec, windowQuery } from "./window.ts";
+// The session:// ProtocolHandler. The engine owns the URL grammar, the tree
+// and every rendering (decision §1); each call here is one read process
+// (decision §2) answering `resolve`, `readDirectory` or `locate` for the URL
+// as omp parsed it. Failures read `session://: <kind>: <message>` (decision §15).
+import { readFileSync } from "node:fs";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { type ShellFsDirEntry, ShellFsFileType } from "@oh-my-pi/pi-natives";
+import { engineContext } from "./engine/context.ts";
+import { failureText } from "./engine/failure.ts";
+import type { Logger } from "./engine/frames.ts";
+import type { Reply, UrlParts } from "./engine/protocol.ts";
+import { type ReadOp, readRequest } from "./engine/read.ts";
 
-const JQ_KEYS: Readonly<Record<string, true>> = { q: true, query: true, raw: true, compact: true, offset: true, limit: true };
-const FIND_KEYS: Readonly<Record<string, true>> = { text: true, project: true, max: true };
-const TYPE_KEYS: Readonly<Record<string, true>> = { type: true };
-const TIME_KEYS: Readonly<Record<string, true>> = { since: true, until: true };
-const DEFAULT_FIND = 20;
-
-interface Located {
-	readonly ref: SessionRef;
-	readonly file: string;
-	readonly base: string;
-	readonly root: string;
-}
-
-function targetOf(url: InternalUrl): Target {
-	return parseTarget(url.rawHost || url.hostname, url.rawPathname ?? url.pathname, url.href);
-}
-
-function query(url: InternalUrl): URLSearchParams {
-	return new URLSearchParams(url.search.startsWith("?") ? url.search.slice(1) : url.search);
-}
-
-function checkKeys(url: InternalUrl, allowed: readonly Readonly<Record<string, true>>[]): void {
-	for (const key of query(url).keys()) {
-		if (!allowed.some((table) => table[key] === true))
-			throw new Error(`session:// does not accept ?${key}= on ${url.href.split("?")[0] ?? ""}`);
-	}
-}
-
-async function locate(at: SessionPath, cwd: string | undefined): Promise<Located> {
-	const ref = await locateSession(at.locator, cwd);
-	const root = `session://${ref.sid}`;
-	if (at.agent === "") return { ref, file: ref.file, base: root, root };
-	return { ref, file: await agentFile(ref, at.agent), base: `${root}/agents/${at.agent}`, root };
+/** The URL as omp's internal-URL parser hands it over; the engine parses its path. */
+function parts(url: InternalUrl): UrlParts {
+	return { href: url.href, host: url.rawHost || url.hostname, pathname: url.rawPathname ?? url.pathname, search: url.search };
 }
 
 function text(url: string, content: string): InternalResource {
 	return { url, content, contentType: "text/plain", size: Buffer.byteLength(content) };
 }
 
-function jsonl(records: Iterable<unknown>): string {
-	return Array.from(records, (record) => JSON.stringify(record)).join("\n");
-}
-
-const SCRATCH_BATCH_RECORDS = 64;
-
-async function jsonlResource(
-	url: InternalUrl,
-	records: Iterable<unknown>,
-	signal: AbortSignal | undefined,
-	keep = "",
-): Promise<InternalResource> {
-	const selector = parseJsonSelector(url.search.startsWith("?") ? url.search.slice(1) : url.search);
-	if (!selector) return text(url.href, jsonl(records));
-	const scratch = path.join(os.tmpdir(), `omp-sessions-${crypto.randomUUID()}.jsonl`);
-	try {
-		const handle = await fs.open(scratch, "w"); // created empty: zero records still need a file for jaq.
-		try {
-			let batch: string[] = [];
-			let started = false;
-			const flush = async (): Promise<void> => {
-				if (batch.length === 0) return;
-				const chunk = batch.join("\n");
-				await handle.writeFile(started ? `\n${chunk}` : chunk);
-				started = true;
-				batch = [];
-			};
-			for (const record of records) {
-				batch.push(JSON.stringify(record));
-				if (batch.length === SCRATCH_BATCH_RECORDS) await flush();
-			}
-			await flush();
-		} finally {
-			await handle.close();
-		}
-		const output = await executeJsonQuery(scratch, selector, signal);
-		return text(url.href, keep === "" ? output : output.replaceAll("; append ?", `; append ?${keep}&`));
-	} finally {
-		await fs.rm(scratch, { force: true });
-	}
-}
-
-function typeFilter(url: InternalUrl, target: Target): TypeFilter | null {
-	return parseTypeFilter([...target.pathTypes, ...query(url).getAll("type")]);
-}
-
-/**
- * Read from the raw query: URLSearchParams
- * would turn the `+` of a `+0800` zone into a space.
- */
-function windowSpec(url: InternalUrl): WindowSpec | null {
-	const pairs = (url.search.startsWith("?") ? url.search.slice(1) : url.search).split("&");
-	const value = (key: string): string | null => {
-		const values = pairs.filter((pair) => pair.startsWith(`${key}=`)).map((pair) => decodeURIComponent(pair.slice(key.length + 1)));
-		if (values.length > 1) throw new Error(`Give ${key}= once; a time window has one start and one end.`);
-		return values[0] ?? null;
-	};
-	return parseWindow(value("since"), value("until"));
-}
-
-function takesType(route: Route): boolean {
-	switch (route.kind) {
-		case "timeline":
-		case "events":
-		case "root":
-		case "projects":
-		case "bucket":
-		case "date":
-		case "sessionDir":
-		case "agentsDir":
-			return true;
-		case "readme":
-		case "bucketSessions":
-		case "allSessions":
-		case "find":
-		case "raw":
-		case "entry":
-		case "artifact":
-		case "local":
-			return false;
-		default: {
-			const unreachable: never = route;
-			throw new Error(`Unhandled route ${String(unreachable)}`);
-		}
-	}
-}
-
-async function find(url: InternalUrl, cwd: string | undefined): Promise<SessionRow[]> {
-	const params = query(url);
-	const needle = params.get("text")?.trim() ?? "";
-	if (needle === "") throw new Error("session://find needs ?text=<words>");
-	const max = Number(params.get("max") ?? DEFAULT_FIND);
-	if (!Number.isInteger(max) || max < 1) throw new Error("session://find ?max= must be a positive integer");
-	return sessionRows({ project: params.get("project"), text: needle, since: null, until: null, limit: max }, cwd);
-}
-
-async function listing(route: Route, cwd: string | undefined): Promise<ShellFsDirEntry[] | null> {
-	const dir = (name: string): ShellFsDirEntry => ({ name, fileType: ShellFsFileType.Dir });
-	const file = (name: string): ShellFsDirEntry => ({ name, fileType: ShellFsFileType.File });
-	switch (route.kind) {
-		case "root":
-			return [dir("projects")];
-		case "projects": {
-			const entries = await fs.readdir(getSessionsDir(), { withFileTypes: true });
-			return entries.filter((entry) => entry.isDirectory()).map((entry) => dir(entry.name));
-		}
-		case "bucket": {
-			const dates = new Set((await bucketSessions(bucketDir(route.bucket, cwd))).map((session) => localDate(session.created)));
-			return [...[...dates].sort().map(dir), file("sessions.jsonl")];
-		}
-		case "date": {
-			const sessions = await bucketSessions(bucketDir(route.bucket, cwd));
-			const sids = new Set(sessions.filter((session) => localDate(session.created) === route.date).map((session) => session.sid));
-			return [...sids].map(dir);
-		}
-		case "sessionDir": {
-			const located = await locate(route.at, cwd);
-			const agents = await childAgents(located.file);
-			return agents.length > 0 ? [file("timeline"), dir("agents")] : [file("timeline")];
-		}
-		case "agentsDir": {
-			const located = await locate(route.at, cwd);
-			return (await childAgents(located.file)).map(dir);
-		}
-		case "readme":
-		case "bucketSessions":
-		case "allSessions":
-		case "find":
-		case "timeline":
-		case "events":
-		case "raw":
-		case "entry":
-		case "artifact":
-		case "local":
-			return null;
-		default: {
-			const unreachable: never = route;
-			throw new Error(`Unhandled route ${String(unreachable)}`);
-		}
-	}
-}
-
-async function hostFile(route: Route, url: InternalUrl, cwd: string | undefined): Promise<string | null> {
-	switch (route.kind) {
-		case "raw":
-			if (url.search) return null;
-			return (await locate(route.at, cwd)).file;
-		case "artifact": {
-			const located = await locate(route.at, cwd);
-			const dir = childDir(located.ref.file);
-			const names = await fs.readdir(dir).catch((): string[] => []);
-			const name = names.find((candidate) => candidate.startsWith(`${route.id}.`));
-			return name ? path.join(dir, name) : null;
-		}
-		case "local": {
-			const located = await locate(route.at, cwd);
-			const file = path.join(childDir(located.ref.file), "local", route.relative);
-			return (await Bun.file(file).exists()) ? file : null;
-		}
-		case "root":
-		case "readme":
-		case "projects":
-		case "bucket":
-		case "bucketSessions":
-		case "date":
-		case "allSessions":
-		case "find":
-		case "sessionDir":
-		case "agentsDir":
-		case "timeline":
-		case "events":
-		case "entry":
-			return null;
-		default: {
-			const unreachable: never = route;
-			throw new Error(`Unhandled route ${String(unreachable)}`);
-		}
-	}
-}
-
-async function leaf(target: Target, url: InternalUrl, context: ResolveContext | undefined): Promise<InternalResource> {
-	const { route } = target;
-	const cwd = context?.cwd;
-	const signal = context?.signal;
-	switch (route.kind) {
-		case "readme":
-			return text(url.href, README);
-		case "allSessions":
-			return jsonlResource(url, metadata(await listSessions(undefined, ALL_SESSIONS)), signal);
-		case "bucketSessions":
-			return jsonlResource(url, metadata(await listSessions(bucketDir(route.bucket, cwd), ALL_SESSIONS)), signal);
-		case "find":
-			return jsonlResource(url, await find(url, cwd), signal);
-		case "timeline": {
-			const types = typeFilter(url, target);
-			const spec = windowSpec(url);
-			const located = await locate(route.at, cwd);
-			const { loaded, filter } = await loadFiltered(
-				located.file,
-				located.ref.sid,
-				route.at.agent,
-				types,
-				spec,
-				Date.now(),
-				"timeline",
-				signal,
-			);
-			const title = route.at.agent === "" && !loaded.meta.title ? ((await readSessionInfo(located.file))?.title ?? null) : null;
-			return text(url.href, renderTimeline(loaded, located.base, located.root, title, filter));
-		}
-		case "events": {
-			const types = typeFilter(url, target);
-			const spec = windowSpec(url);
-			const located = await locate(route.at, cwd);
-			const { loaded, filter } = await loadFiltered(
-				located.file,
-				located.ref.sid,
-				route.at.agent,
-				types,
-				spec,
-				Date.now(),
-				"records",
-				signal,
-			);
-			const keep = [
-				types === null ? "" : `type=${types.source.replaceAll("%", "%25").replaceAll("&", "%26")}`,
-				filter.window === null ? "" : windowQuery(filter.window),
-			]
-				.filter((part) => part !== "")
-				.join("&");
-			return jsonlResource(url, eventRecords(loaded, located.base, filter), signal, keep);
-		}
-		case "entry": {
-			const located = await locate(route.at, cwd);
-			const detail = await loadEntry(located.file, route.selector, signal);
-			const name = route.selector.kind === "id" ? `#${route.selector.id}` : `line ${route.selector.line}`;
-			if (!detail) throw new Error(`No entry ${name} in ${located.base}`);
-			return text(url.href, renderEntry(detail, located.base, located.ref.sid));
-		}
-		case "raw":
-			if (url.search)
-				throw new Error(
-					`${url.href.split("?")[0] ?? ""} takes no query: jq runs on events.jsonl and sessions.jsonl; grep or read raw.jsonl directly.`,
-				);
-			throw new Error(`Session file for ${url.href} not found`);
-		case "artifact":
-		case "local":
-			throw new Error(`${url.href} not found in the session's artifacts`);
-		case "root":
-		case "projects":
-		case "bucket":
-		case "date":
-		case "sessionDir":
-		case "agentsDir":
-			throw new Error(`${url.href} is a directory`);
-		default: {
-			const unreachable: never = route;
-			throw new Error(`Unhandled route ${String(unreachable)}`);
-		}
-	}
-}
-
-function allowedKeys(route: Route): readonly Readonly<Record<string, true>>[] {
-	switch (route.kind) {
-		case "timeline":
-			return [TYPE_KEYS, TIME_KEYS];
-		case "events":
-			return [JQ_KEYS, TYPE_KEYS, TIME_KEYS];
-		case "allSessions":
-		case "bucketSessions":
-			return [JQ_KEYS];
-		case "find":
-			return [JQ_KEYS, FIND_KEYS];
-		case "raw":
-			return [JQ_KEYS]; // accepted only to answer with the jq-is-not-here error
-		default:
-			return [];
-	}
+function unexpected(op: string, reply: Reply): Error {
+	return new Error(`session://: the engine answered ${op} with a ${reply.kind} reply`);
 }
 
 export class SessionUrlHandler implements ProtocolHandler {
 	readonly scheme = "session";
 	readonly spec: SchemeSpec = { backing: "file", selectors: "lines", immutable: true, linkable: false };
+	readonly #logger: Logger;
+
+	constructor(logger: Logger) {
+		this.#logger = logger;
+	}
+
+	async #read(op: ReadOp, context: ResolveContext | undefined): Promise<Reply> {
+		try {
+			return await readRequest(op, engineContext(context?.cwd ?? process.cwd()), context?.signal, this.#logger);
+		} catch (error) {
+			throw new Error(`session://: ${failureText(error)}`);
+		}
+	}
 
 	promptDoc(): string {
-		return "`session://`: other OMP sessions on this machine (read-only). Find: `session://find?text=<words>`, `session://sessions.jsonl?q=<jq>`; read: `session://<id>/timeline` (thinking, speech, IRC, calls as signatures; `?type=thinking,irc` filters by kind, `?since=1430&until=1500` or `?since=2h` by time, no raw `:` at the URL's end), `…/entry/<id>` for one call's full args/result, `…/events.jsonl?q=<jq>`; grep `session://here/<date>/*/timeline` (filtered: `session://type/<types>/here/…`). Grammar: `read session://README`.";
+		return "`session://`: other OMP sessions on this machine (read-only). Read: `session://<id>/timeline` (thinking, speech, IRC, calls as signatures; `?type=thinking,irc` filters by kind, `?since=1430&until=1500` or `?since=2h` by time, no raw `:` at the URL's end), `…/entry/<id>` for one call's full args/result, `…/events.jsonl?q=<jq>`; grep `session://here/<date>/*/timeline` (filtered: `session://type/<types>/here/…`); find sessions with the `archive` eval global. Grammar: `read help://read/urls`.";
+	}
+
+	/** The whole URL grammar, served by omp at `help://read/urls`. */
+	promptReference(): string {
+		return readFileSync(new URL("../engine/url-grammar.md", import.meta.url), "utf8").trim();
 	}
 
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		try {
-			const target = targetOf(url);
-			if (target.pathTypes.length > 0) return null;
-			return await hostFile(target.route, url, context?.cwd);
+			const reply = await readRequest(
+				{ op: "locate", url: parts(url) },
+				engineContext(context?.cwd ?? process.cwd()),
+				context?.signal,
+				this.#logger,
+			);
+			return reply.kind === "located" ? reply.file : null;
 		} catch {
+			// Malformed, unknown or ambiguous: resolve reports the full reason.
 			return null;
 		}
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const target = targetOf(url);
-		checkKeys(url, allowedKeys(target.route));
-		if (target.pathTypes.length > 0 && !takesType(target.route))
-			throw new Error(`session://type/<filter>/ applies to timeline and events.jsonl (and the directories above them), not ${url.href}`);
-		typeFilter(url, target);
-		const entries = await listing(target.route, context?.cwd);
-		if (entries) {
-			const content = context?.skipDirectoryListing
-				? ""
-				: entries.map((entry) => (entry.fileType === ShellFsFileType.Dir ? `${entry.name}/` : entry.name)).join("\n");
-			return { ...text(url.href, content), isDirectory: true };
+		const op: ReadOp = { op: "resolve", url: parts(url), skipDirectoryListing: context?.skipDirectoryListing === true };
+		const reply = await this.#read(op, context);
+		switch (reply.kind) {
+			case "resource":
+				return text(url.href, reply.content);
+			case "directory":
+				return { ...text(url.href, reply.content), isDirectory: true };
+			default:
+				throw unexpected("resolve", reply);
 		}
-		return leaf(target, url, context);
 	}
 
 	async readDirectory(url: InternalUrl, context?: ResolveContext): Promise<ShellFsDirEntry[]> {
-		const entries = await listing(targetOf(url).route, context?.cwd);
-		if (!entries) throw new Error(`${url.href} is not a directory`);
-		return entries;
+		const reply = await this.#read({ op: "readDirectory", url: parts(url) }, context);
+		if (reply.kind !== "entries") throw unexpected("readDirectory", reply);
+		return reply.entries.map((entry) => ({ name: entry.name, fileType: entry.dir ? ShellFsFileType.Dir : ShellFsFileType.File }));
 	}
 }

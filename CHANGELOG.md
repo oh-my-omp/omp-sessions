@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `session_query` no longer has the `sessions` action or its `project`, `text`, `since` and `until` parameters; a `sessions` call fails with `bad_request` naming omp's `archive` eval global, which lists sessions, searches prompts and reads recaps
+- `session://find`, `session://README` and the three `sessions.jsonl` URLs are gone, and `src.sessions` has no `recap` column; the `session://` grammar is now at `help://read/urls`
+
+### Changed
+
+- `session://` reads and `session_query` calls run in a separate engine process (Rust, `engine/`) instead of inside omp, so omp's memory no longer grows with the sessions a query reads; `sql` and `export` run in one query process per omp session, which keeps the tables created in `main` until `/new` or exit
+- The engine binary is downloaded from the GitHub Release of the installed version on first use and checked against the sha256 that Release's `digests.json` lists; the DuckDB native addon (`@duckdb/node-api`) is no longer installed
+- A transcript whose last message is more than 24 hours old is parsed once and kept under omp's agent cache directory (`omp-sessions`), so repeated reads and queries of it skip the session file; transcripts still being written are read from the file every time
+- Failures name their kind: `session://: <kind>: <message>` for reads and `session_query <action> failed: <kind>: <message>` for tool calls, with kinds such as `not_found`, `query_failed`, `aborted`, `engine_exited` and `engine_unavailable`
+
 ## [0.1.23] - 2026-11-20
 
 ### Fixed

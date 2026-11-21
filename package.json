@@ -11,6 +11,7 @@
 		"index.ts",
 		"src",
 		"omomp-shared",
+		"engine/url-grammar.md",
 		"CHANGELOG.md"
 	],
 	"omp": {
@@ -22,20 +23,20 @@
 		"changelog": "CHANGELOG.md"
 	},
 	"scripts": {
-		"check": "biome check . && tsc --noEmit",
+		"check": "biome check . && tsc --noEmit && bun scripts/engine.ts check",
+		"engine:build": "bun scripts/engine.ts build",
 		"format": "biome check --write .",
-		"test": "bun test"
-	},
-	"dependencies": {
-		"@duckdb/node-api": "latest"
+		"test": "bun test && bun scripts/engine.ts test"
 	},
 	"peerDependencies": {
+		"@oh-my-pi/omptype": "*",
 		"@oh-my-pi/pi-coding-agent": "*",
 		"@oh-my-pi/pi-natives": "*",
 		"@oh-my-pi/pi-utils": "*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "latest",
+		"@oh-my-pi/omptype": "latest",
 		"@oh-my-pi/pi-coding-agent": "latest",
 		"@oh-my-pi/pi-natives": "latest",
 		"@oh-my-pi/pi-utils": "latest",
