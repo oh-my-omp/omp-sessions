@@ -14,6 +14,8 @@
 - A transcript whose last message is more than 24 hours old is parsed once and kept under omp's agent cache directory (`omp-sessions`), so repeated reads and queries of it skip the session file; transcripts still being written are read from the file every time
 - Failures name their kind: `session://: <kind>: <message>` for reads and `session_query <action> failed: <kind>: <message>` for tool calls, with kinds such as `not_found`, `query_failed`, `aborted`, `engine_exited` and `engine_unavailable`
 
+## [0.1.23] - 2026-11-20
+
 ### Fixed
 
 - A sid-prefix lookup now also matches header-named session files when a stamped name shares the prefix, and distinct ids from stamped names and headers make the prefix ambiguous
