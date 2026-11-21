@@ -8,6 +8,7 @@
 //!   src.events       the active-branch events of every transcript (the events.jsonl records)
 //! Rows passed in `tables` become `src.<name>`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,7 +18,7 @@ use regex::Regex;
 
 use super::{Cancel, failed};
 use crate::cache::Cache;
-use crate::duck::{Appender, Duck, Scalar};
+use crate::duck::{Appender, ColumnSlice, Duck, Scalar};
 use crate::error::{EngineError, Result};
 use crate::filter::{self, FilteredRead};
 use crate::info;
@@ -196,10 +197,6 @@ impl Cell {
 	fn text(value: Option<String>) -> Cell {
 		value.map_or(Cell::Null, Cell::Str)
 	}
-
-	fn int(value: Option<i64>) -> Cell {
-		value.map_or(Cell::Null, Cell::Int)
-	}
 }
 
 struct Column {
@@ -300,16 +297,142 @@ impl Table {
 		self.appender.end_row().map_err(|error| failed(error, cancel))
 	}
 
+	/// `src.events` rows built on a worker, appended a chunk at a time.
+	fn events(&mut self, rows: &EventRows, cancel: &Cancel) -> Result<()> {
+		self.appender.columns(rows.len(), &rows.columns()).map_err(|error| failed(error, cancel))
+	}
+
 	fn close(self, cancel: &Cancel) -> Result<()> {
 		self.appender.close().map_err(|error| failed(error, cancel))
 	}
 }
 
+/// A VARCHAR column of rows being built: the values back to back, where each
+/// row's value ends, and which rows are not NULL.
+#[derive(Default)]
+struct TextColumn {
+	bytes: String,
+	ends: Vec<usize>,
+	valid: Vec<bool>,
+}
+
+impl TextColumn {
+	fn push(&mut self, text: Option<&str>) {
+		if let Some(text) = text {
+			self.bytes.push_str(text);
+		}
+		self.end_row(text.is_some());
+	}
+
+	/// Ends a row whose value was written to `bytes` directly.
+	fn end_row(&mut self, valid: bool) {
+		self.ends.push(self.bytes.len());
+		self.valid.push(valid);
+	}
+
+	fn slice(&self) -> ColumnSlice<'_> {
+		ColumnSlice::Text { bytes: &self.bytes, ends: &self.ends, valid: &self.valid }
+	}
+}
+
+/// A BIGINT column of rows being built.
+#[derive(Default)]
+struct IntColumn {
+	values: Vec<i64>,
+	valid: Vec<bool>,
+}
+
+impl IntColumn {
+	fn push(&mut self, value: Option<i64>) {
+		self.values.push(value.unwrap_or(0));
+		self.valid.push(value.is_some());
+	}
+
+	fn slice(&self) -> ColumnSlice<'_> {
+		ColumnSlice::Int { values: &self.values, valid: &self.valid }
+	}
+}
+
+/// One transcript's `src.events` rows, column by column, built on a worker so
+/// the thread owning DuckDB only hands whole chunks to the appender.
+#[derive(Default)]
+struct EventRows {
+	sid: TextColumn,
+	agent: TextColumn,
+	seq: IntColumn,
+	turn: IntColumn,
+	t: TextColumn,
+	kind: TextColumn,
+	entry: TextColumn,
+	block: IntColumn,
+	line: IntColumn,
+	call_id: TextColumn,
+	tool: TextColumn,
+	status: TextColumn,
+	result_entry: TextColumn,
+	text: TextColumn,
+	data: TextColumn,
+	url: TextColumn,
+}
+
+impl EventRows {
+	fn len(&self) -> usize {
+		self.seq.values.len()
+	}
+
+	/// One row. The text column shows `text`, else `source`; `data` holds the
+	/// record without exactly that field, so no text lives in the table twice.
+	fn push(&mut self, transcript: &TranscriptRow, seq: usize, record: &Obj) {
+		let text = text_of(record, "text");
+		let source = text_of(record, "source");
+		let copied = if text.is_some() { "text" } else if source.is_some() { "source" } else { "" };
+		self.sid.push(Some(&transcript.sid));
+		self.agent.push(Some(&transcript.agent));
+		self.seq.push(Some(seq as i64));
+		self.turn.push(int_of(record, "turn"));
+		self.t.push(text_of(record, "t").as_deref());
+		self.kind.push(text_of(record, "kind").as_deref());
+		self.entry.push(text_of(record, "entry").as_deref());
+		self.block.push(int_of(record, "block"));
+		self.line.push(int_of(record, "line"));
+		self.call_id.push(text_of(record, "callId").as_deref());
+		self.tool.push(text_of(record, "tool").as_deref());
+		self.status.push(text_of(record, "status").as_deref());
+		self.result_entry.push(text_of(record, "resultEntry").as_deref());
+		self.text.push(text.or(source).as_deref());
+		json::write_without(&mut self.data.bytes, record, copied);
+		self.data.end_row(true);
+		self.url.push(text_of(record, "url").as_deref());
+	}
+
+	/// The columns in `EVENTS` order.
+	fn columns(&self) -> [ColumnSlice<'_>; 16] {
+		[
+			self.sid.slice(),
+			self.agent.slice(),
+			self.seq.slice(),
+			self.turn.slice(),
+			self.t.slice(),
+			self.kind.slice(),
+			self.entry.slice(),
+			self.block.slice(),
+			self.line.slice(),
+			self.call_id.slice(),
+			self.tool.slice(),
+			self.status.slice(),
+			self.result_entry.slice(),
+			self.text.slice(),
+			self.data.slice(),
+			self.url.slice(),
+		]
+	}
+}
+
 /// `record[key]` when it is a string (a clipped string reads as its marked text).
-fn text_of(record: &Obj, key: &str) -> Option<String> {
+fn text_of<'a>(record: &'a Obj, key: &str) -> Option<Cow<'a, str>> {
 	match record.get(key)? {
-		Value::Str(text) => Some(text.clone()),
-		Value::Clipped(clipped) => Some(clipped.marked()),
+		Value::Str(text) => Some(Cow::Borrowed(text)),
+		Value::Clipped(clipped) => Some(Cow::Owned(clipped.marked())),
 		_ => None,
 	}
 }
@@ -320,32 +443,6 @@ fn int_of(record: &Obj, key: &str) -> Option<i64> {
 		Value::Num(number) => Some(*number as i64),
 		_ => None,
 	}
-}
-
-/// One `src.events` row. The text column shows `text`, else `source`; `data`
-/// holds the record without exactly that field, so no text lives in the table twice.
-fn event_row(transcript: &TranscriptRow, seq: usize, record: &Obj) -> Vec<Cell> {
-	let text = text_of(record, "text");
-	let source = text_of(record, "source");
-	let copied = if text.is_some() { "text" } else if source.is_some() { "source" } else { "" };
-	vec![
-		Cell::Str(transcript.sid.clone()),
-		Cell::Str(transcript.agent.clone()),
-		Cell::Int(seq as i64),
-		Cell::int(int_of(record, "turn")),
-		Cell::text(text_of(record, "t")),
-		Cell::text(text_of(record, "kind")),
-		Cell::text(text_of(record, "entry")),
-		Cell::int(int_of(record, "block")),
-		Cell::int(int_of(record, "line")),
-		Cell::text(text_of(record, "callId")),
-		Cell::text(text_of(record, "tool")),
-		Cell::text(text_of(record, "status")),
-		Cell::text(text_of(record, "resultEntry")),
-		Cell::text(text.or(source)),
-		Cell::Str(json::stringify_without(record, copied)),
-		Cell::text(text_of(record, "url")),
-	]
 }
 
 /// One `src.sessions` row from a root session file's head and tail, by the
@@ -398,7 +495,7 @@ fn entries_scan(file: &TranscriptRow) -> String {
 /// One transcript's `src.transcripts` row and, when wanted, its `src.events` rows.
 struct TranscriptRows {
 	transcript: Vec<Cell>,
-	events: Vec<Vec<Cell>>,
+	events: EventRows,
 }
 
 fn transcript_rows(cache: Option<&Cache>, transcript: &TranscriptRow, wants_events: bool, now: i64) -> Result<TranscriptRows> {
@@ -406,15 +503,14 @@ fn transcript_rows(cache: Option<&Cache>, transcript: &TranscriptRow, wants_even
 		filter::load_filtered(cache, &transcript.file, &transcript.sid, &transcript.agent, None, None, now, FilteredRead::Records)?;
 	let url = ops::transcript_url(&transcript.sid, &transcript.agent);
 	let records = render::event_records(&loaded, &url, &filter);
-	let events = if wants_events {
-		records
-			.iter()
-			.enumerate()
-			.filter_map(|(seq, record)| record.as_obj().map(|record| event_row(transcript, seq, record)))
-			.collect()
-	} else {
-		Vec::new()
-	};
+	let mut events = EventRows::default();
+	if wants_events {
+		for (seq, record) in records.iter().enumerate() {
+			if let Some(record) = record.as_obj() {
+				events.push(transcript, seq, record);
+			}
+		}
+	}
 	let meta = &loaded.meta;
 	let row = vec![
 		Cell::Str(transcript.sid.clone()),
@@ -571,9 +667,7 @@ fn session_relations(duck: &Duck, selection: &Selection, needed: &Needed, contex
 				table.row(rows.transcript, cancel)?;
 			}
 			if let Some(table) = events_table.as_mut() {
-				for row in rows.events {
-					table.row(row, cancel)?;
-				}
+				table.events(&rows.events, cancel)?;
 			}
 			Ok(())
 		})?;

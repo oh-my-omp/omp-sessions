@@ -167,7 +167,7 @@ impl Duck {
 		let mut raw: ffi::duckdb_appender = ptr::null_mut();
 		let state =
 			unsafe { ffi::duckdb_appender_create_ext(self.conn.raw, ptr::null(), schema_c.as_ptr(), table_c.as_ptr(), &mut raw) };
-		let appender = Appender { raw, _conn: Arc::clone(&self.conn) };
+		let appender = Appender { raw, scratch: None, _conn: Arc::clone(&self.conn) };
 		if state != ffi::DuckDBSuccess {
 			return Err(appender.error("could not create an appender"));
 		}
@@ -496,9 +496,42 @@ impl Drop for Chunk {
 	}
 }
 
+/// One column of rows handed to [`Appender::columns`]; `valid[i]` false makes row `i` NULL.
+pub enum ColumnSlice<'a> {
+	/// Row `i` is `bytes[ends[i - 1]..ends[i]]` (from 0 for the first row).
+	Text { bytes: &'a str, ends: &'a [usize], valid: &'a [bool] },
+	Int { values: &'a [i64], valid: &'a [bool] },
+}
+
+/// `text` as a DuckDB string that refers to `text` without copying it (inlined
+/// when it fits, as DuckDB stores short strings).
+fn string_ref(text: &[u8]) -> ffi::duckdb_string_t {
+	const INLINE: usize = 12;
+	let length = u32::try_from(text.len()).expect("a VARCHAR value is under 4 GiB");
+	if text.len() <= INLINE {
+		let mut inlined = [0 as std::os::raw::c_char; INLINE];
+		for (slot, byte) in inlined.iter_mut().zip(text) {
+			*slot = *byte as std::os::raw::c_char;
+		}
+		ffi::duckdb_string_t { value: ffi::duckdb_string_t__bindgen_ty_1 { inlined: ffi::duckdb_string_t__bindgen_ty_1__bindgen_ty_2 { length, inlined } } }
+	} else {
+		let mut prefix = [0 as std::os::raw::c_char; 4];
+		for (slot, byte) in prefix.iter_mut().zip(text) {
+			*slot = *byte as std::os::raw::c_char;
+		}
+		ffi::duckdb_string_t {
+			value: ffi::duckdb_string_t__bindgen_ty_1 {
+				pointer: ffi::duckdb_string_t__bindgen_ty_1__bindgen_ty_1 { length, prefix, ptr: text.as_ptr().cast_mut().cast() },
+			},
+		}
+	}
+}
+
 /// Appends rows to one table; `close` flushes them.
 pub struct Appender {
 	raw: ffi::duckdb_appender,
+	/// The chunk `columns` fills, made on its first use from the table's column types.
+	scratch: Option<Chunk>,
 	_conn: Arc<Conn>,
 }
 
@@ -538,6 +571,57 @@ impl Appender {
 	/// Appends a whole chunk whose column types match the table's.
 	pub fn chunk(&mut self, chunk: &Chunk) -> Result<()> {
 		self.check(unsafe { ffi::duckdb_append_data_chunk(self.raw, chunk.0) })
+	}
+
+	/// Appends `rows` rows given column by column, in the table's column order,
+	/// a whole chunk at a time. Strings are referred to, not copied, until
+	/// DuckDB copies them while appending each chunk. Rows appended this way
+	/// must not be mixed with a row being appended value by value.
+	pub fn columns(&mut self, rows: usize, columns: &[ColumnSlice<'_>]) -> Result<()> {
+		let width = unsafe { ffi::duckdb_appender_column_count(self.raw) };
+		assert_eq!(columns.len() as ffi::idx_t, width, "one slice per table column");
+		if self.scratch.is_none() {
+			let types: Vec<LogicalType> = (0..width).map(|column| LogicalType(unsafe { ffi::duckdb_appender_column_type(self.raw, column) })).collect();
+			let mut raw_types: Vec<ffi::duckdb_logical_type> = types.iter().map(LogicalType::raw).collect();
+			self.scratch = Some(Chunk(unsafe { ffi::duckdb_create_data_chunk(raw_types.as_mut_ptr(), raw_types.len() as ffi::idx_t) }));
+		}
+		let Some(chunk) = self.scratch.as_ref() else { unreachable!("made above") };
+		let chunk = chunk.0;
+		let capacity = usize::try_from(unsafe { ffi::duckdb_vector_size() }).unwrap_or(1);
+		let mut start = 0;
+		while start < rows {
+			let count = capacity.min(rows - start);
+			unsafe { ffi::duckdb_data_chunk_reset(chunk) };
+			for (index, column) in columns.iter().enumerate() {
+				let vector = unsafe { ffi::duckdb_data_chunk_get_vector(chunk, index as ffi::idx_t) };
+				let valid = match column {
+					ColumnSlice::Text { bytes, ends, valid } => {
+						let data = unsafe { ffi::duckdb_vector_get_data(vector) }.cast::<ffi::duckdb_string_t>();
+						for row in 0..count {
+							let at = start + row;
+							let begin = if at == 0 { 0 } else { ends[at - 1] };
+							unsafe { data.add(row).write(string_ref(&bytes.as_bytes()[begin..ends[at]])) };
+						}
+						valid
+					}
+					ColumnSlice::Int { values, valid } => {
+						let data = unsafe { ffi::duckdb_vector_get_data(vector) }.cast::<i64>();
+						unsafe { std::ptr::copy_nonoverlapping(values[start..start + count].as_ptr(), data, count) };
+						valid
+					}
+				};
+				for (row, _) in valid[start..start + count].iter().enumerate().filter(|(_, valid)| !**valid) {
+					unsafe {
+						ffi::duckdb_vector_ensure_validity_writable(vector);
+						ffi::duckdb_validity_set_row_invalid(ffi::duckdb_vector_get_validity(vector), row as ffi::idx_t);
+					}
+				}
+			}
+			unsafe { ffi::duckdb_data_chunk_set_size(chunk, count as ffi::idx_t) };
+			self.check(unsafe { ffi::duckdb_append_data_chunk(self.raw, chunk) })?;
+			start += count;
+		}
+		Ok(())
 	}
 
 	/// Flushes the appended rows into the table.
