@@ -1,9 +1,10 @@
-// The engine binary (decision §6): `<package root>/engine/bin/omp-sessions-engine`
-// (`.exe` on win32). A file there is used as it is. Without it, a package that
-// carries `engine/digests.json` downloads this platform's asset from the GitHub
-// Release `v<version>` of its `repository.url`, checks the asset's sha256
-// against digests.json, and renames it into place; a package without
-// digests.json is a development checkout that has not run `bun run engine:build`.
+// The engine binary (decision §18): `<package root>/engine/bin/omp-sessions-engine`
+// (`.exe` on win32). A file there is used as it is. Without it, the shell
+// downloads `digests.json` and this platform's asset from the GitHub Release
+// `v<version>` of the package's `repository.url`, checks the asset's sha256
+// against digests.json, and renames it into place. A Release without
+// digests.json has no engine assets (decision §19 uploads it last), so the
+// binary has to be built locally with `bun run engine:build`.
 // The binary lives as long as the package directory, so it always matches the
 // shell's version.
 import * as fs from "node:fs/promises";
@@ -58,9 +59,11 @@ function githubRepo(url: string): string {
 	return `${match[1]}/${match[2]}`;
 }
 
-async function download(url: string, signal: AbortSignal | undefined): Promise<Uint8Array> {
+/** The body of `url`; HTTP 404 throws `notFound`. */
+async function download(url: string, signal: AbortSignal | undefined, notFound: EngineFailure): Promise<Uint8Array> {
 	try {
 		const response = await fetch(url, { signal, redirect: "follow" });
+		if (response.status === 404) throw notFound;
 		if (!response.ok) throw unavailable("download_failed", `${url}: HTTP ${response.status} ${response.statusText}`);
 		return new Uint8Array(await response.arrayBuffer());
 	} catch (error) {
@@ -75,19 +78,34 @@ export async function engineBinary(signal: AbortSignal | undefined): Promise<str
 	const target = platform();
 	const file = binaryPath();
 	if (await exists(file)) return file;
-	const sumsJson = await jsonFile(path.join(ROOT, "engine", "digests.json"));
-	if (sumsJson === null) throw unavailable("not_built", `${file} does not exist; build it with \`bun run engine:build\``);
-	const sums = digests.safeParse(sumsJson);
-	if (!sums.success) throw unavailable("digest_mismatch", `engine/digests.json: ${sums.error.message}`);
 	const pkg = manifest.safeParse(await jsonFile(path.join(ROOT, "package.json")));
 	if (!pkg.success) throw unavailable("download_failed", `package.json: ${pkg.error.message}`);
+	const tag = `v${pkg.data.version}`;
+	const release = `https://github.com/${githubRepo(pkg.data.repository.url)}/releases/download/${tag}`;
+	const sumsUrl = `${release}/digests.json`;
+	const sumsBytes = await download(
+		sumsUrl,
+		signal,
+		unavailable(
+			"not_built",
+			`${file} does not exist and Release ${tag} has no engine assets (${sumsUrl}: HTTP 404); build it with \`bun run engine:build\``,
+		),
+	);
+	let sumsJson: unknown;
+	try {
+		sumsJson = JSON.parse(new TextDecoder().decode(sumsBytes));
+	} catch (error) {
+		throw unavailable("digest_mismatch", `${sumsUrl}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const sums = digests.safeParse(sumsJson);
+	if (!sums.success) throw unavailable("digest_mismatch", `${sumsUrl}: ${sums.error.message}`);
 	const asset = `omp-sessions-engine-${target}${EXE}`;
 	const expected = sums.data[asset];
-	if (expected === undefined) throw unavailable("digest_mismatch", `engine/digests.json lists no sha256 for ${asset}`);
-	const url = `https://github.com/${githubRepo(pkg.data.repository.url)}/releases/download/v${pkg.data.version}/${asset}`;
-	const bytes = await download(url, signal);
+	if (expected === undefined) throw unavailable("digest_mismatch", `${sumsUrl} lists no sha256 for ${asset}`);
+	const url = `${release}/${asset}`;
+	const bytes = await download(url, signal, unavailable("download_failed", `${url}: HTTP 404`));
 	const actual = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-	if (actual !== expected) throw unavailable("digest_mismatch", `${url} has sha256 ${actual}; engine/digests.json expects ${expected}`);
+	if (actual !== expected) throw unavailable("digest_mismatch", `${url} has sha256 ${actual}; ${sumsUrl} expects ${expected}`);
 	await fs.mkdir(path.dirname(file), { recursive: true });
 	const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
 	try {

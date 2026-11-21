@@ -12,7 +12,6 @@
 		"src",
 		"omomp-shared",
 		"engine/url-grammar.md",
-		"engine/digests.json",
 		"CHANGELOG.md"
 	],
 	"omp": {
