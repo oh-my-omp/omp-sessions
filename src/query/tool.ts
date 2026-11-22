@@ -1,136 +1,74 @@
-// The session_query tool: this machine's omp sessions as relations for eval
-// cells, which call it as `tool.session_query({...})` and read `.details`.
-// The request is parsed once here into a discriminated union and becomes one
-// engine request: `agents` and `events` run in a read process, `sql` and
-// `export` in the calling omp session's query process (decision §2, §3).
-// Failures read `session_query <action> failed: <kind>: <message>` (decision §15).
-import { readFileSync } from "node:fs";
+// The session_query tool: DuckDB SQL and export over this machine's omp
+// sessions, called directly or from eval (`(await tool.session_query({...})).details`).
+// Runs in the calling omp session's query process (decision §2, §3); when
+// `tables` specifies named event tables, those rows are fetched via `readRequest`.
+// Failures read `session_query <sql|export> failed: <kind>: <message>` (decision §15).
+import { closeSync, type Dirent, existsSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
+import * as path from "node:path";
 import { z } from "@oh-my-pi/omptype/zod";
 import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n.ts";
+import type { ToolTopicDoc } from "../../omomp-shared/internal-url.ts";
 import { engineContext } from "../engine/context.ts";
 import { EngineFailure, failureText } from "../engine/failure.ts";
 import type { Logger } from "../engine/frames.ts";
-import type { Reply } from "../engine/protocol.ts";
+import type { Context, Reply, Selection } from "../engine/protocol.ts";
 import type { QueryOp, QueryProcesses } from "../engine/query.ts";
-import { type ReadOp, readRequest } from "../engine/read.ts";
+import { readRequest } from "../engine/read.ts";
 
 export const TOOL = "session_query";
 
-const MAX_SESSIONS = 50;
+const BUILTIN_SRC_TABLES = new Set(["files", "entries", "sessions", "transcripts", "events"]);
+const TABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
-/** The operations this tool serves; `action` selects the request shape. `sessions` only answers where to go instead. */
-const ACTIONS = ["sessions", "agents", "events", "sql", "export"] as const;
-
-const SESSIONS_GONE =
-	"the sessions action is gone: list sessions, search prompts and read recaps with omp's `archive` eval global (archive.sessions, archive.search, archive.prompts, archive.recaps); its session ids work as sid here";
-
-const sid = z.string().min(1).describe("session id or unique id prefix");
 const scalar = z.union([z.string(), z.number(), z.boolean(), z.null()]);
-
-const query = z
-	.string()
-	.min(1)
-	.describe(
-		"`sql` and `export`: the SQL to run; several statements may be separated by `;` and the last one's result comes back; `export` runs a single SELECT",
-	);
-const path = z.string().min(1).describe("`export`: absolute file path outside the omp sessions directory");
-const format = z.enum(["parquet", "csv", "json"]);
-
-const from = z
+const sid = z.string().min(1).describe("session id or unique id prefix");
+const tableSpec = z
 	.object({
-		sids: z.array(sid).min(1).max(MAX_SESSIONS).describe("session ids or unique id prefixes; at most 50"),
-		agents: z.boolean().optional().describe("also read every subagent transcript; default true"),
+		name: z
+			.string()
+			.regex(TABLE_NAME_RE, "table name must start with a letter or _ followed by up to 63 letters, digits, or _")
+			.describe("table name created under schema src"),
+		sids: z.array(sid).min(1).optional().describe("session ids or prefixes to materialize; defaults to the call's scope"),
+		agent: z.string().optional().describe("subagent id; omitted loads root transcript"),
 	})
-	.strict()
-	.optional()
-	.describe(
-		"`sql` and `export`: the sessions whose relations become schema `src`, read again on every call; omitted: no session relations",
-	);
+	.strict();
 
-/** The rows `tables` JSON text carries, once decoded. */
-const tablesValue = z
-	.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/), z.array(z.record(z.string(), z.unknown())).min(1))
-	.optional();
-/** The bindings `params` JSON text carries, once decoded. */
-const paramsValue = z.union([z.array(scalar), z.record(z.string(), scalar)]).optional();
-
-/** What the model sees: one object, `action` selecting which other fields apply. */
-const parameters = z.object({
-	action: z
-		.enum(ACTIONS)
-		.describe(
-			"the operation: `agents` a transcript tree, `events` a page of events, `sql` runs a query, `export` writes a query result to a file; `sessions` is gone, use omp's `archive` eval global",
-		),
-	sid: sid.optional().describe("`agents` and `events`: session id or unique id prefix"),
-	agent: z.string().optional().describe("`events`: subagent id; omitted: the root transcript"),
-	type: z.string().optional().describe("`events`: session:// type filter, e.g. `thinking,irc` or `call:bash`"),
-	offset: z
-		.number()
-		.int()
-		.min(0)
+export const parameters = z.object({
+	query: z.string().min(1).describe("DuckDB SQL to run (last statement result returned; single SELECT for export_to)"),
+	from: z.enum(["here", "all"]).optional().describe("session scope when sids is omitted: 'here' (current project) or 'all'"),
+	sids: z.array(sid).min(1).optional().describe("explicit session ids or unique id prefixes to load into schema src"),
+	agents: z.array(z.string()).optional().describe("subagent ids to include ([] loads root transcripts only)"),
+	tables: z.array(tableSpec).optional().describe("named event tables materialized into schema src"),
+	params: z.record(z.string(), scalar).optional().describe("named $key SQL bindings for a single statement"),
+	export_to: z
+		.object({
+			path: z.string().min(1).describe("absolute file path outside the omp sessions directory"),
+			format: z.enum(["parquet", "csv", "json"]).describe("output file format"),
+		})
+		.strict()
 		.optional()
-		.describe("`events`: 0-based index of the first record; default 0; the previous page's `next` continues from there"),
-	limit: z
-		.number()
-		.int()
-		.min(1)
-		.optional()
-		.describe("row cap: `events` default 500 (at most 5000), `sql` default 1000 (at most 100000); `export` takes none"),
-	query: query.optional(),
-	from,
-	tables: z
-		.string()
-		.optional()
-		.describe(
-			'`sql` and `export`: JSON text of rows from the cell, e.g. `{"t": [{"a": 1}, {"a": 2}]}` becomes table `src.t`; booleans, integers, numbers and strings keep their type, a column of anything else becomes JSON',
-		),
-	params: z
-		.string()
-		.optional()
-		.describe(
-			'`sql` and `export`: JSON text of the bindings for one statement, e.g. `[1, "a"]` for positional `?` or `{"v": "a"}` for named `$v`; values are strings, numbers, booleans or null',
-		),
-	path: path.optional(),
-	format: format.optional().describe("`export`: the file to write: parquet, csv or json"),
+		.describe("write query result to a file instead of returning rows"),
 });
 
-const agentsRequest = z.object({ action: z.literal("agents"), sid }).strict();
-const eventsRequest = z
-	.object({
-		action: z.literal("events"),
-		sid,
-		agent: z.string().optional(),
-		type: z.string().optional(),
-		offset: z.number().int().min(0).optional(),
-		limit: z.number().int().min(1).max(5000).optional(),
-	})
-	.strict();
-const sqlRequest = z
-	.object({
-		action: z.literal("sql"),
-		query,
-		from,
-		tables: tablesValue,
-		params: paramsValue,
-		limit: z.number().int().min(1).max(100_000).optional(),
-	})
-	.strict();
-const exportRequest = z
-	.object({ action: z.literal("export"), query, path, format, from, tables: tablesValue, params: paramsValue })
-	.strict();
-
-/** One request shape per served `action`, what `parseRequest` hands the rest of this file. */
-const requests = {
-	agents: agentsRequest,
-	events: eventsRequest,
-	sql: sqlRequest,
-	export: exportRequest,
-} as const;
-type Request = z.infer<typeof agentsRequest> | z.infer<typeof eventsRequest> | z.infer<typeof sqlRequest> | z.infer<typeof exportRequest>;
+const strictParameters = parameters.strict();
+export type SessionQueryRequest = z.infer<typeof strictParameters>;
 type Details = Record<string, unknown>;
 
-/** Field-first text for a zod failure, e.g. `query: must be removed`; the path names the field. */
+export const DESCRIPTION =
+	"Query OMP session history with DuckDB SQL (schema src, persistent main) or export to parquet/csv/json. Read tool://session_query/sql before querying.";
+
+export function sessionQuerySqlTopic(): ToolTopicDoc {
+	return {
+		tool: TOOL,
+		topic: "sql",
+		title: "SQL over the session files",
+		when: "before querying or exporting with session_query: src relations, persistent main schema, and allowed SQL",
+		body: () => readFileSync(new URL("./topics/sql.md", import.meta.url), "utf8").trim(),
+	};
+}
+
+/** Field-first text for a zod failure, e.g. `query: must be string`; the path names the field. */
 function issues(error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] }): string {
 	return error.issues
 		.map((issue) => {
@@ -144,131 +82,161 @@ function badRequest(message: string): EngineFailure {
 	return new EngineFailure("bad_request", message);
 }
 
-/** The value a `params` or `tables` argument carries; text that is not JSON fails naming the field. */
-function jsonText(value: string | undefined, name: string): unknown {
-	if (value === undefined) return undefined;
+export function parseRequest(raw: unknown): SessionQueryRequest {
+	const parsed = strictParameters.safeParse(raw);
+	if (!parsed.success) throw badRequest(issues(parsed.error));
+	return parsed.data;
+}
+
+function readHeaderSessionId(filePath: string): string | null {
+	let fd: number | undefined;
 	try {
-		return JSON.parse(value);
-	} catch (error) {
-		throw badRequest(`${name}: not JSON text (${error instanceof Error ? error.message : String(error)})`);
+		fd = openSync(filePath, "r");
+		const buffer = Buffer.alloc(4096);
+		const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+		if (bytes <= 0) return null;
+		const text = buffer.toString("utf8", 0, bytes);
+		const newline = text.indexOf("\n");
+		const firstLine = (newline === -1 ? text : text.slice(0, newline)).trim();
+		if (!firstLine) return null;
+		const parsed = JSON.parse(firstLine) as { id?: unknown };
+		return typeof parsed.id === "string" && parsed.id.length > 0 ? parsed.id : null;
+	} catch {
+		return null;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
 	}
 }
 
-/** The action a raw argument object names, for the failure text of a call that does not parse. */
-function actionOf(raw: unknown): string {
-	const parsed = z.object({ action: z.string() }).safeParse(raw);
-	return parsed.success ? parsed.data.action : "call";
+function extractSidFromFilename(name: string, fullPath: string): string | null {
+	const stamped = /_([0-9a-fA-F-]+)\.jsonl$/.exec(name);
+	if (stamped?.[1]) return stamped[1];
+	return readHeaderSessionId(fullPath);
 }
 
-/**
- * The one entry both `approval` and `execute` use: parse the flat `parameters`
- * object, decode its JSON text, then admit the result as the request shape its
- * `action` names. Fields that belong to another action and missing required
- * fields fail here as `bad_request`, naming the field.
- */
-function parseRequest(raw: unknown): Request {
-	const flat = parameters.safeParse(raw);
-	if (!flat.success) throw badRequest(issues(flat.error));
-	if (flat.data.action === "sessions") throw badRequest(SESSIONS_GONE);
-	// The flat parse keeps every declared key, absent ones as `undefined`; a
-	// branch admits only the fields it declares, so drop those and decode first.
-	const decoded = Object.fromEntries(
-		Object.entries({
-			...flat.data,
-			params: jsonText(flat.data.params, "params"),
-			tables: jsonText(flat.data.tables, "tables"),
-		}).filter(([, value]) => value !== undefined),
-	);
-	const request = requests[flat.data.action].safeParse(decoded);
-	if (!request.success) throw badRequest(issues(request.error));
-	return request.data;
-}
-
-const DESCRIPTION = [
-	"SQL and row queries over this machine's omp sessions, called from eval: `(await tool.session_query({action, …})).details` in a JS or Python cell.",
-	"`sql` runs DuckDB on the session files in place (relations in schema `src`, rebuilt each call); tables you create in `main` last for this session; `export` writes a result to a file you name.",
-].join("\n");
-
-const TOPICS = [
-	{ name: "actions", when: "before a session_query call" },
-	{ name: "sql", when: "before sql or export: the src relations, what persists, what SQL may do" },
-] as const;
-
-const TOPIC_POINTERS = [
-	"Topics — read the one a call needs before making it:",
-	...TOPICS.map((topic) => `- \`help://${TOOL}/${topic.name}\` — ${topic.when}`),
-].join("\n");
-
-function topics(): Readonly<Record<string, string>> {
-	return Object.fromEntries(
-		TOPICS.map((topic) => [topic.name, readFileSync(new URL(`./topics/${topic.name}.md`, import.meta.url), "utf8")]),
-	);
-}
-
-function unexpected(action: string, reply: Reply): Error {
-	return new Error(`the engine answered ${action} with a ${reply.kind} reply`);
-}
-
-/** The engine op of a request. */
-function readOp(request: Extract<Request, { action: "agents" | "events" }>): ReadOp {
-	switch (request.action) {
-		case "agents":
-			return { op: "agents", sid: request.sid };
-		case "events":
-			return {
-				op: "events",
-				sid: request.sid,
-				agent: request.agent,
-				type: request.type,
-				offset: request.offset,
-				limit: request.limit,
-			};
-		default: {
-			const unreachable: never = request;
-			throw new Error(`Unhandled action ${String(unreachable)}`);
+function scanBucketSids(dir: string): string[] {
+	if (!existsSync(dir)) return [];
+	const seen = new Set<string>();
+	const sids: string[] = [];
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const files = entries
+		.filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+		.map((entry) => entry.name)
+		.sort()
+		.reverse();
+	for (const name of files) {
+		const sidValue = extractSidFromFilename(name, path.join(dir, name));
+		if (sidValue && !seen.has(sidValue)) {
+			seen.add(sidValue);
+			sids.push(sidValue);
 		}
 	}
+	return sids;
 }
 
-function queryOp(request: Extract<Request, { action: "sql" | "export" }>): QueryOp {
-	switch (request.action) {
-		case "sql":
-			return { op: "sql", query: request.query, from: request.from, tables: request.tables, params: request.params, limit: request.limit };
-		case "export":
-			return {
-				op: "export",
-				query: request.query,
-				path: request.path,
-				format: request.format,
-				from: request.from,
-				tables: request.tables,
-				params: request.params,
-			};
-		default: {
-			const unreachable: never = request;
-			throw new Error(`Unhandled action ${String(unreachable)}`);
+function discoverScopeSids(scope: "here" | "all", context: Context): string[] {
+	if (scope === "here") {
+		return scanBucketSids(context.hereDir);
+	}
+	if (!existsSync(context.sessionsDir)) return [];
+	const seen = new Set<string>();
+	const sids: string[] = [];
+	let buckets: Dirent[];
+	try {
+		buckets = readdirSync(context.sessionsDir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	for (const bucket of buckets) {
+		if (!bucket.isDirectory()) continue;
+		for (const sidValue of scanBucketSids(path.join(context.sessionsDir, bucket.name))) {
+			if (!seen.has(sidValue)) {
+				seen.add(sidValue);
+				sids.push(sidValue);
+			}
 		}
 	}
+	return sids;
 }
 
-/** The `details` of a reply, in the shapes the `actions` topic documents. */
-function details(action: Request["action"], reply: Reply): Details {
+function resolveSelection(request: SessionQueryRequest, context: Context): Selection | undefined {
+	if (!request.sids && !request.from) return undefined;
+	const sids = request.sids ? request.sids : discoverScopeSids(request.from ?? "here", context);
+	const includeAgents = request.agents === undefined ? true : request.agents.some((agent) => agent !== "");
+	return { sids, agents: includeAgents };
+}
+
+async function materializeTables(
+	specs: NonNullable<SessionQueryRequest["tables"]>,
+	fallbackSids: readonly string[] | undefined,
+	context: Context,
+	signal: AbortSignal | undefined,
+	logger: Logger,
+): Promise<Record<string, Array<Record<string, unknown>>>> {
+	const out: Record<string, Array<Record<string, unknown>>> = {};
+	for (const spec of specs) {
+		if (BUILTIN_SRC_TABLES.has(spec.name)) {
+			throw badRequest(`tables.${spec.name}: src.${spec.name} is built from the named sessions; pick another name`);
+		}
+		if (Object.hasOwn(out, spec.name)) {
+			throw badRequest(`tables.${spec.name}: duplicate table name`);
+		}
+		const targetSids = spec.sids ?? fallbackSids;
+		if (!targetSids || targetSids.length === 0) {
+			throw badRequest(`tables.${spec.name}: provide sids on the table or a session scope`);
+		}
+		const rows: Array<Record<string, unknown>> = [];
+		for (const targetSid of targetSids) {
+			let offset = 0;
+			for (;;) {
+				const reply = await readRequest(
+					{
+						op: "events",
+						sid: targetSid,
+						...(spec.agent !== undefined && spec.agent !== "" ? { agent: spec.agent } : {}),
+						offset,
+						limit: 5000,
+					},
+					context,
+					signal,
+					logger,
+				);
+				if (reply.kind !== "page") {
+					throw new Error(`the engine answered events with a ${reply.kind} reply`);
+				}
+				rows.push(...reply.rows);
+				if (reply.next === null || reply.next <= offset) break;
+				offset = reply.next;
+			}
+		}
+		if (rows.length === 0) {
+			throw badRequest(`tables.${spec.name}: no matching events found`);
+		}
+		out[spec.name] = rows;
+	}
+	return out;
+}
+
+function details(opName: string, reply: Reply): Details {
 	switch (reply.kind) {
-		case "rows":
-			return { rows: reply.rows };
-		case "page":
-			return { rows: reply.rows, total: reply.total, offset: reply.offset, next: reply.next };
 		case "sqlRows":
 			return { kind: "rows", columns: reply.columns, rows: reply.rows, truncated: reply.truncated };
 		case "changes":
 			return { kind: "changes", changes: reply.changes };
 		case "exported":
 			return { path: reply.path, format: reply.format, rows: reply.rows, columns: reply.columns };
+		case "rows":
+		case "page":
 		case "resource":
 		case "directory":
 		case "entries":
 		case "located":
-			throw unexpected(action, reply);
+			throw new Error(`the engine answered ${opName} with a ${reply.kind} reply`);
 		default: {
 			const unreachable: never = reply;
 			throw new Error(`Unhandled reply ${String(unreachable)}`);
@@ -277,27 +245,36 @@ function details(action: Request["action"], reply: Reply): Details {
 }
 
 async function run(
-	request: Request,
+	request: SessionQueryRequest,
 	processes: QueryProcesses,
 	logger: Logger,
 	ctx: ExtensionContext,
 	signal: AbortSignal | undefined,
 ): Promise<Details> {
-	switch (request.action) {
-		case "agents":
-		case "events":
-			return details(request.action, await readRequest(readOp(request), engineContext(ctx.cwd), signal, logger));
-		case "sql":
-		case "export": {
-			const sessionId = ctx.sessionManager.getSessionId();
-			const reply = await processes.call(sessionId, queryOp(request), engineContext(ctx.cwd, sessionId), signal);
-			return details(request.action, reply);
-		}
-		default: {
-			const unreachable: never = request;
-			throw new Error(`Unhandled action ${String(unreachable)}`);
-		}
-	}
+	const sessionId = ctx.sessionManager.getSessionId();
+	const context = engineContext(ctx.cwd, sessionId);
+	const from = resolveSelection(request, context);
+	const fallbackSids = from?.sids.length ? from.sids : sessionId ? [sessionId] : undefined;
+	const tables = request.tables ? await materializeTables(request.tables, fallbackSids, context, signal, logger) : undefined;
+	const op: QueryOp = request.export_to
+		? {
+				op: "export",
+				query: request.query,
+				path: request.export_to.path,
+				format: request.export_to.format,
+				...(from ? { from } : {}),
+				...(tables ? { tables } : {}),
+				...(request.params ? { params: request.params } : {}),
+			}
+		: {
+				op: "sql",
+				query: request.query,
+				...(from ? { from } : {}),
+				...(tables ? { tables } : {}),
+				...(request.params ? { params: request.params } : {}),
+			};
+	const reply = await processes.call(sessionId, op, context, signal);
+	return details(op.op, reply);
 }
 
 /** The most JSON text a direct call shows. */
@@ -341,59 +318,54 @@ export function jsonWithin(value: unknown, budget: number): string | null {
 }
 
 /** The text a direct (non-eval) call shows; eval cells read `details`. */
-function summary(request: Request, result: Details): string {
+function summary(isExport: boolean, result: Details): string {
 	return (
 		jsonWithin(result, SUMMARY_CHARS) ??
-		`${request.action}: more than ${SUMMARY_CHARS} chars of JSON in details; call from eval and read .details`
+		`${isExport ? "export" : "sql"}: more than ${SUMMARY_CHARS} chars of JSON in details; call from eval and read .details`
 	);
 }
 
-/** Writing a file needs write approval; every other action only reads session files. */
-function approval(args: unknown): "read" | "write" {
-	let request: Request;
+/** Writing an export file needs write approval; SQL queries only read session files. */
+export function approval(args: unknown): "read" | "write" {
 	try {
-		request = parseRequest(args);
+		const request = parseRequest(args);
+		return request.export_to !== undefined ? "write" : "read";
 	} catch {
-		return actionOf(args) === "sessions" ? "read" : "write";
-	}
-	switch (request.action) {
-		case "agents":
-		case "events":
-		case "sql":
-			return "read";
-		case "export":
+		if (args !== null && typeof args === "object" && "export_to" in args && (args as { export_to?: unknown }).export_to !== undefined) {
 			return "write";
-		default: {
-			const unreachable: never = request;
-			throw new Error(`Unhandled action ${String(unreachable)}`);
 		}
+		return "read";
 	}
 }
 
 /** Query failures are expected (bad SQL, unknown session) and come back as tool errors, not log warnings. */
-export function sessionQueryTool(
-	processes: QueryProcesses,
-	logger: Logger,
-): ToolDefinition<typeof parameters> & { docTopics(): Readonly<Record<string, string>> } {
+export function sessionQueryTool(processes: QueryProcesses, logger: Logger): ToolDefinition<typeof parameters> {
 	return {
 		name: TOOL,
 		label: tr("Session Query", "会话查询"),
-		description: `${DESCRIPTION}\n\n${TOPIC_POINTERS}`,
+		description: DESCRIPTION,
 		approval,
 		parameters,
-		docTopics: topics,
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
-			let request: Request;
+			let request: SessionQueryRequest;
 			try {
 				request = parseRequest(rawParams);
 			} catch (error) {
-				return { content: [{ type: "text", text: `session_query ${actionOf(rawParams)} failed: ${failureText(error)}` }], isError: true };
+				const opName =
+					rawParams !== null &&
+					typeof rawParams === "object" &&
+					"export_to" in rawParams &&
+					(rawParams as { export_to?: unknown }).export_to !== undefined
+						? "export"
+						: "sql";
+				return { content: [{ type: "text", text: `session_query ${opName} failed: ${failureText(error)}` }], isError: true };
 			}
+			const opName = request.export_to ? "export" : "sql";
 			try {
 				const result = await run(request, processes, logger, ctx, signal);
-				return { content: [{ type: "text", text: summary(request, result) }], details: result };
+				return { content: [{ type: "text", text: summary(Boolean(request.export_to), result) }], details: result };
 			} catch (error) {
-				return { content: [{ type: "text", text: `session_query ${request.action} failed: ${failureText(error)}` }], isError: true };
+				return { content: [{ type: "text", text: `session_query ${opName} failed: ${failureText(error)}` }], isError: true };
 			}
 		},
 	};

@@ -16,7 +16,12 @@ READ A SESSION   (<id> = any unique id prefix; listed paths below use the full i
                                     timing and the whole result text
   session://<id>/entry/@<line>      the entry on that physical line of raw.jsonl
   session://<id>/raw.jsonl          the session file itself (read/grep only; no jq)
-  session://<id>/agents/            subagents; session://<id>/agents/<AgentId>/{timeline,events.jsonl,entry/…}
+  session://<id>/agents         transcript tree as JSON: { rows: [{ sid, agent, parent, file, bytes, modified }] }
+                                (session://here/agents resolves the current session)
+  session://<id>/agents/        subagent tree; session://<id>/agents/<AgentId>/{timeline,events.jsonl,entry/…}
+  session://<id>/events[?type=…&agent=…&limit=N&offset=N]
+                                paginated active-branch events as JSON: { rows, total, offset, next }
+                                (default limit 500, max 5000; session://here/events resolves the current session)
   session://<id>/artifacts/<N>      that session's artifact://N; session://<id>/local/<path> its local://
   References to artifact://, agent://, history:// and local:// inside a timeline are already
   rewritten to these session:// URLs.
