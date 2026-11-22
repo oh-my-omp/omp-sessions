@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the shared copy of `internal-url.ts` to oh-my-omp/shared@b601064.
+
 ## [0.2.0] - 2026-11-22
 
 ### Breaking Changes
