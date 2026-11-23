@@ -22,7 +22,7 @@
  * the base system prompt stays the same across `/restart` and the prompt cache survives it. SQL
  * and `export_to` run in the session's query process (src/engine/query.ts), which keeps the tables
  * the caller creates in `main` until `session_switch` or `session_shutdown` ends it; its guide is
- * registered at `tool://session_query/sql`.
+ * registered at `help://session_query/sql`.
  *
  * Files: the shell opens no session file. The engine binary is fetched into engine/bin on first
  * use when the package carries none (src/engine/binary.ts); the engine writes its cold cache
@@ -67,7 +67,7 @@ export default function ompSessions(pi: ExtensionAPI): void {
 	try {
 		registerToolTopics("omp-sessions", [sessionQuerySqlTopic()]);
 	} catch (error) {
-		pi.logger.warn("omp-sessions: tool:// topic registration failed", { error: errorText(error) });
+		pi.logger.warn("omp-sessions: help:// topic registration failed", { error: errorText(error) });
 	}
 	const processes = new QueryProcesses(pi.logger);
 	pi.registerTool({ ...sessionQueryTool(processes, pi.logger), defaultInactive: true });

@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { InternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { clearToolTopics, registerToolTopics, resolveToolTopic } from "../omomp-shared/internal-url.ts";
+import { QueryProcesses } from "../src/engine/query.ts";
 import { routeSpecialRead, SessionUrlHandler } from "../src/handler.ts";
-import { approval, DESCRIPTION, parseRequest, sessionQuerySqlTopic } from "../src/query/tool.ts";
+import { approval, DESCRIPTION, parseRequest, sessionQuerySqlTopic, sessionQueryTool } from "../src/query/tool.ts";
 
 function fakeUrl(href: string): InternalUrl {
 	const parsed = new URL(href);
@@ -92,9 +93,9 @@ describe("session:// /agents and /events routing", () => {
 });
 
 describe("session_query refactored schema and topic", () => {
-	test("description is <= 200 chars and points to tool://session_query/sql", () => {
+	test("description is <= 200 chars and points to help://session_query/sql", () => {
 		expect(DESCRIPTION.length).toBeLessThanOrEqual(200);
-		expect(DESCRIPTION).toContain("tool://session_query/sql");
+		expect(DESCRIPTION).toContain("help://session_query/sql");
 	});
 
 	test("accepts native JSON tables, params, scope, and export_to", () => {
@@ -123,12 +124,14 @@ describe("session_query refactored schema and topic", () => {
 		expect(approval({ query: "SELECT 1", export_to: { path: "/tmp/out.csv", format: "csv" } })).toBe("write");
 	});
 
-	test("registers tool://session_query/sql via registerToolTopics", () => {
+	test("registers help://session_query/sql via registerToolTopics and native docTopics", () => {
 		registerToolTopics("omp-sessions", [sessionQuerySqlTopic()]);
 		const resolved = resolveToolTopic("session_query", "sql");
 		expect(resolved).toBeDefined();
 		expect(resolved?.content).toContain("export_to");
 		expect(resolved?.content).not.toContain('action: "sql"');
 		expect(resolveToolTopic("session_query", "actions")).toBeUndefined();
+		const tool = sessionQueryTool(new QueryProcesses(noopLogger), noopLogger);
+		expect(tool.docTopics().sql).toContain("export_to");
 	});
 });

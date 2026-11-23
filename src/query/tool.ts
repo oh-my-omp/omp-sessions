@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { z } from "@oh-my-pi/omptype/zod";
 import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n.ts";
-import type { ToolTopicDoc } from "../../omomp-shared/internal-url.ts";
+import { type ToolTopicDoc, toDocTopics } from "../../omomp-shared/internal-url.ts";
 import { engineContext } from "../engine/context.ts";
 import { EngineFailure, failureText } from "../engine/failure.ts";
 import type { Logger } from "../engine/frames.ts";
@@ -56,7 +56,7 @@ export type SessionQueryRequest = z.infer<typeof strictParameters>;
 type Details = Record<string, unknown>;
 
 export const DESCRIPTION =
-	"Query OMP session history with DuckDB SQL (schema src, persistent main) or export to parquet/csv/json. Read tool://session_query/sql before querying.";
+	"Query OMP session history with DuckDB SQL (schema src, persistent main) or export to parquet/csv/json. Read help://session_query/sql before querying.";
 
 export function sessionQuerySqlTopic(): ToolTopicDoc {
 	return {
@@ -339,13 +339,17 @@ export function approval(args: unknown): "read" | "write" {
 }
 
 /** Query failures are expected (bad SQL, unknown session) and come back as tool errors, not log warnings. */
-export function sessionQueryTool(processes: QueryProcesses, logger: Logger): ToolDefinition<typeof parameters> {
+export function sessionQueryTool(
+	processes: QueryProcesses,
+	logger: Logger,
+): ToolDefinition<typeof parameters> & { docTopics(): Record<string, string> } {
 	return {
 		name: TOOL,
 		label: tr("Session Query", "会话查询"),
 		description: DESCRIPTION,
 		approval,
 		parameters,
+		docTopics: toDocTopics([sessionQuerySqlTopic()]),
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
 			let request: SessionQueryRequest;
 			try {
