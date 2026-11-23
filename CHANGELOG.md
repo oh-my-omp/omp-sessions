@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `session_query` takes one flat request instead of an `action`: `query` is the DuckDB SQL, `from` (`"here"` or `"all"`), `sids`, `agents` and `tables` choose the relations it reads, and `export_to` writes the result to a file instead of returning it; the `sid`, `agent`, `type`, `offset`, `limit`, `path` and `format` parameters are gone
+- The `agents` and `events` actions are gone: a transcript tree comes from `read session://<sid>/agents` (or `session://here/agents`) and a page of active-branch events from `read session://<sid>/events?type=…&agent=…&limit=…&offset=…` (or `session://here/events`), each as JSON with `rows` and, for events, `total`, `offset` and `next`
+- `tables` is now an array of `{name, sids?, agent?}` entries that materialize named event tables in schema `src`, instead of JSON text of pre-built rows, and `params` is an object of named `$key` bindings instead of JSON text that also accepted positional arrays
+
 ## [0.2.0] - 2026-11-22
 
 ### Breaking Changes
