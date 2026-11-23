@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
 ### Breaking Changes
 
 - `session_query` takes one flat request instead of an `action`: `query` is the DuckDB SQL, `from` (`"here"` or `"all"`), `sids`, `agents` and `tables` choose the relations it reads, and `export_to` writes the result to a file instead of returning it; the `sid`, `agent`, `type`, `offset`, `limit`, `path` and `format` parameters are gone
