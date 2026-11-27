@@ -37,6 +37,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { applyActiveTools } from "./omomp-shared/active-tools.ts";
 import { registerInternalScheme, registerToolTopics } from "./omomp-shared/internal-url.ts";
+import { omompTool } from "./omomp-shared/tool-entry.ts";
 import { QueryProcesses } from "./src/engine/query.ts";
 import { errorText } from "./src/errors.ts";
 import { SessionUrlHandler } from "./src/handler.ts";
@@ -70,7 +71,7 @@ export default function ompSessions(pi: ExtensionAPI): void {
 		pi.logger.warn("omp-sessions: help:// topic registration failed", { error: errorText(error) });
 	}
 	const processes = new QueryProcesses(pi.logger);
-	pi.registerTool({ ...sessionQueryTool(processes, pi.logger), defaultInactive: true });
+	pi.registerTool(omompTool({ ...sessionQueryTool(processes, pi.logger), defaultInactive: true }));
 	pi.on("session_start", async () => {
 		try {
 			const active = new Set(pi.getActiveTools());
