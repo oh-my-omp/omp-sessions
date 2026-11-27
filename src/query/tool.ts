@@ -9,6 +9,7 @@ import { z } from "@oh-my-pi/omptype/zod";
 import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n.ts";
 import { type ToolTopicDoc, toDocTopics } from "../../omomp-shared/internal-url.ts";
+import { omompTool, verbatim } from "../../omomp-shared/tool-entry.ts";
 import { engineContext } from "../engine/context.ts";
 import { EngineFailure, failureText } from "../engine/failure.ts";
 import type { Logger } from "../engine/frames.ts";
@@ -21,7 +22,6 @@ export const TOOL = "session_query";
 const BUILTIN_SRC_TABLES = new Set(["files", "entries", "sessions", "transcripts", "events"]);
 const TABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
-const scalar = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 const sid = z.string().min(1).describe("session id or unique id prefix");
 const tableSpec = z
 	.object({
@@ -33,26 +33,60 @@ const tableSpec = z
 		agent: z.string().optional().describe("subagent id; omitted loads root transcript"),
 	})
 	.strict();
+const sqlBinding = z
+	.object({
+		key: z.string().describe("named $key SQL placeholder"),
+		kind: z
+			.enum(["text", "empty_text", "number", "boolean", "null"])
+			.describe("SQL binding value type; empty_text binds '' and null binds SQL NULL"),
+		text: verbatim(z.string().optional().describe("text binding, whitespace kept as written; applies when kind is text")),
+		number: z.number().optional().describe("numeric binding; applies when kind is number"),
+		boolean: z.boolean().optional().describe("boolean binding; applies when kind is boolean"),
+	})
+	.strict();
+
+const exportTo = z
+	.object({
+		path: z.string().min(1).describe("absolute file path outside the omp sessions directory"),
+		format: z.enum(["parquet", "csv", "json"]).describe("output file format"),
+	})
+	.strict()
+	.optional()
+	.describe("write query result to a file instead of returning rows");
 
 export const parameters = z.object({
 	query: z.string().min(1).describe("DuckDB SQL to run (last statement result returned; single SELECT for export_to)"),
 	from: z.enum(["here", "all"]).optional().describe("session scope when sids is omitted: 'here' (current project) or 'all'"),
 	sids: z.array(sid).min(1).optional().describe("explicit session ids or unique id prefixes to load into schema src"),
-	agents: z.array(z.string()).optional().describe("subagent ids to include ([] loads root transcripts only)"),
+	agents: z.array(z.string()).optional().describe("subagent transcript selection; a non-empty list includes subagents"),
+	agent_scope: z
+		.enum(["all", "root_only"])
+		.optional()
+		.describe("transcript scope; defaults to all, root_only excludes subagents and takes precedence over agents"),
 	tables: z.array(tableSpec).optional().describe("named event tables materialized into schema src"),
-	params: z.record(z.string(), scalar).optional().describe("named $key SQL bindings for a single statement"),
-	export_to: z
+	params: z
 		.object({
-			path: z.string().min(1).describe("absolute file path outside the omp sessions directory"),
-			format: z.enum(["parquet", "csv", "json"]).describe("output file format"),
+			bindings: z
+				.array(sqlBinding)
+				.describe("named $key SQL bindings; each entry declares its kind and matching value field; use at least one entry"),
 		})
 		.strict()
 		.optional()
-		.describe("write query result to a file instead of returning rows"),
+		.describe("named SQL parameter bindings for a single statement"),
+	export_to: exportTo,
 });
 
 const strictParameters = parameters.strict();
-export type SessionQueryRequest = z.infer<typeof strictParameters>;
+type SessionQueryInput = z.infer<typeof strictParameters>;
+
+type SqlBinding =
+	| { key: string; kind: "text"; value: string }
+	| { key: string; kind: "empty_text" }
+	| { key: string; kind: "number"; value: number }
+	| { key: string; kind: "boolean"; value: boolean }
+	| { key: string; kind: "null" };
+
+export type SessionQueryRequest = Omit<SessionQueryInput, "params"> & { params?: { bindings?: SqlBinding[] } };
 type Details = Record<string, unknown>;
 
 export const DESCRIPTION =
@@ -85,7 +119,36 @@ function badRequest(message: string): EngineFailure {
 export function parseRequest(raw: unknown): SessionQueryRequest {
 	const parsed = strictParameters.safeParse(raw);
 	if (!parsed.success) throw badRequest(issues(parsed.error));
-	return parsed.data;
+	const params = parsed.data.params?.bindings?.map(({ key, kind, text, number, boolean }): SqlBinding => {
+		switch (kind) {
+			case "text":
+				if (text === undefined || number !== undefined || boolean !== undefined)
+					throw badRequest(`params.${key}: kind text requires only text`);
+				return { key, kind, value: text };
+			case "empty_text":
+				if (text !== undefined || number !== undefined || boolean !== undefined)
+					throw badRequest(`params.${key}: kind empty_text takes no value field`);
+				return { key, kind };
+			case "number":
+				if (number === undefined || text !== undefined || boolean !== undefined)
+					throw badRequest(`params.${key}: kind number requires only number`);
+				return { key, kind, value: number };
+			case "boolean":
+				if (boolean === undefined || text !== undefined || number !== undefined)
+					throw badRequest(`params.${key}: kind boolean requires only boolean`);
+				return { key, kind, value: boolean };
+			case "null":
+				if (text !== undefined || number !== undefined || boolean !== undefined)
+					throw badRequest(`params.${key}: kind null takes no value field`);
+				return { key, kind };
+			default: {
+				const unreachable: never = kind;
+				throw new Error(`Unhandled SQL binding kind ${String(unreachable)}`);
+			}
+		}
+	});
+	const { params: _params, ...request } = parsed.data;
+	return { ...request, ...(params ? { params: { bindings: params } } : {}) };
 }
 
 function readHeaderSessionId(filePath: string): string | null {
@@ -165,10 +228,35 @@ function discoverScopeSids(scope: "here" | "all", context: Context): string[] {
 }
 
 function resolveSelection(request: SessionQueryRequest, context: Context): Selection | undefined {
-	if (!request.sids && !request.from) return undefined;
+	if (!request.sids && !request.from && request.agent_scope === undefined) return undefined;
 	const sids = request.sids ? request.sids : discoverScopeSids(request.from ?? "here", context);
-	const includeAgents = request.agents === undefined ? true : request.agents.some((agent) => agent !== "");
-	return { sids, agents: includeAgents };
+	return { sids, agents: request.agent_scope !== "root_only" };
+}
+
+function sqlBindings(bindings: SqlBinding[] | undefined): Record<string, string | number | boolean | null> | undefined {
+	if (!bindings) return undefined;
+	const result: Record<string, string | number | boolean | null> = {};
+	for (const binding of bindings) {
+		if (Object.hasOwn(result, binding.key)) throw badRequest(`params.${binding.key}: duplicate binding`);
+		switch (binding.kind) {
+			case "text":
+			case "number":
+			case "boolean":
+				result[binding.key] = binding.value;
+				break;
+			case "empty_text":
+				result[binding.key] = "";
+				break;
+			case "null":
+				result[binding.key] = null;
+				break;
+			default: {
+				const unreachable: never = binding;
+				throw new Error(`Unhandled SQL binding ${String(unreachable)}`);
+			}
+		}
+	}
+	return result;
 }
 
 async function materializeTables(
@@ -198,7 +286,7 @@ async function materializeTables(
 					{
 						op: "events",
 						sid: targetSid,
-						...(spec.agent !== undefined && spec.agent !== "" ? { agent: spec.agent } : {}),
+						...(spec.agent !== undefined ? { agent: spec.agent } : {}),
 						offset,
 						limit: 5000,
 					},
@@ -256,6 +344,7 @@ async function run(
 	const from = resolveSelection(request, context);
 	const fallbackSids = from?.sids.length ? from.sids : sessionId ? [sessionId] : undefined;
 	const tables = request.tables ? await materializeTables(request.tables, fallbackSids, context, signal, logger) : undefined;
+	const params = sqlBindings(request.params?.bindings);
 	const op: QueryOp = request.export_to
 		? {
 				op: "export",
@@ -264,14 +353,14 @@ async function run(
 				format: request.export_to.format,
 				...(from ? { from } : {}),
 				...(tables ? { tables } : {}),
-				...(request.params ? { params: request.params } : {}),
+				...(params ? { params } : {}),
 			}
 		: {
 				op: "sql",
 				query: request.query,
 				...(from ? { from } : {}),
 				...(tables ? { tables } : {}),
-				...(request.params ? { params: request.params } : {}),
+				...(params ? { params } : {}),
 			};
 	const reply = await processes.call(sessionId, op, context, signal);
 	return details(op.op, reply);
@@ -325,16 +414,30 @@ function summary(isExport: boolean, result: Details): string {
 	);
 }
 
+function hasExportToArg(value: unknown): boolean {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		"export_to" in value &&
+		(value as { export_to?: unknown }).export_to !== undefined
+	);
+}
+
+const exportApprovalProbe = omompTool({
+	name: TOOL,
+	parameters: z.object({ export_to: exportTo }),
+	execute(_id: unknown, params: unknown): boolean {
+		return hasExportToArg(params);
+	},
+});
+
 /** Writing an export file needs write approval; SQL queries only read session files. */
 export function approval(args: unknown): "read" | "write" {
 	try {
-		const request = parseRequest(args);
-		return request.export_to !== undefined ? "write" : "read";
+		return exportApprovalProbe.execute("approval", args) ? "write" : "read";
 	} catch {
-		if (args !== null && typeof args === "object" && "export_to" in args && (args as { export_to?: unknown }).export_to !== undefined) {
-			return "write";
-		}
-		return "read";
+		return hasExportToArg(args) ? "write" : "read";
 	}
 }
 
@@ -355,13 +458,7 @@ export function sessionQueryTool(
 			try {
 				request = parseRequest(rawParams);
 			} catch (error) {
-				const opName =
-					rawParams !== null &&
-					typeof rawParams === "object" &&
-					"export_to" in rawParams &&
-					(rawParams as { export_to?: unknown }).export_to !== undefined
-						? "export"
-						: "sql";
+				const opName = hasExportToArg(rawParams) ? "export" : "sql";
 				return { content: [{ type: "text", text: `session_query ${opName} failed: ${failureText(error)}` }], isError: true };
 			}
 			const opName = request.export_to ? "export" : "sql";
