@@ -37,6 +37,7 @@
 	"devDependencies": {
 		"@biomejs/biome": "latest",
 		"@oh-my-pi/omptype": "latest",
+		"@oh-my-pi/pi-ai": "latest",
 		"@oh-my-pi/pi-coding-agent": "latest",
 		"@oh-my-pi/pi-natives": "latest",
 		"@oh-my-pi/pi-utils": "latest",
