@@ -13,7 +13,7 @@ Built when the call starts from `from` / `sids` / `agents` and `tables`, dropped
 - `src.events`(sid, agent, seq, turn, t, kind, entry, block, line, call_id, tool, status, result_entry, text, data, url): the active branch in order, as `events.jsonl` serves it; `data` is the record as JSON without the field that went into `text` (its `text`, or its `source` when it has no `text`). A call joins to its result through `result_entry` within the same (sid, agent). Text over the session:// limits ends in `…[clipped: N chars total]`; `url` reads the entry in full.
 - `src.<name>`: each `{ name, sids?, agent? }` entry in `tables` materialized from the corresponding transcript events.
 
-`params` contains a `bindings` array of `{ key, kind, text?, number?, boolean? }` entries. Use `{ key: "note", kind: "empty_text" }` to bind an empty string (an empty `text` counts as not written), `{ key: "missing", kind: "null" }` to bind SQL `NULL`, and the matching value field for `text`, `number` or `boolean`; `text` keeps whitespace as written. For example, `{ key: "ok", kind: "boolean", boolean: false }` and `{ key: "count", kind: "number", number: 0 }` preserve false and zero; pass them as `params: { bindings: [{ key: "note", kind: "empty_text" }, { key: "missing", kind: "null" }] }`.
+Each entry in `params.bindings` pairs `kind` with only its matching value field (omit all value fields for kinds without one), using unique `$key` names across the call; e.g. `params: { bindings: [{ key: "note", kind: "empty_text" }, { key: "missing", kind: "null" }, { key: "ok", kind: "boolean", boolean: false }, { key: "count", kind: "number", number: 0 }] }`.
 
 ## Schema `main`: results that last
 

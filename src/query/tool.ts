@@ -9,7 +9,7 @@ import { z } from "@oh-my-pi/omptype/zod";
 import type { ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { tr } from "../../omomp-shared/i18n.ts";
 import { type ToolTopicDoc, toDocTopics } from "../../omomp-shared/internal-url.ts";
-import { verbatim } from "../../omomp-shared/tool-entry.ts";
+import { omompTool, verbatim } from "../../omomp-shared/tool-entry.ts";
 import { engineContext } from "../engine/context.ts";
 import { EngineFailure, failureText } from "../engine/failure.ts";
 import type { Logger } from "../engine/frames.ts";
@@ -45,6 +45,15 @@ const sqlBinding = z
 	})
 	.strict();
 
+const exportTo = z
+	.object({
+		path: z.string().min(1).describe("absolute file path outside the omp sessions directory"),
+		format: z.enum(["parquet", "csv", "json"]).describe("output file format"),
+	})
+	.strict()
+	.optional()
+	.describe("write query result to a file instead of returning rows");
+
 export const parameters = z.object({
 	query: z.string().min(1).describe("DuckDB SQL to run (last statement result returned; single SELECT for export_to)"),
 	from: z.enum(["here", "all"]).optional().describe("session scope when sids is omitted: 'here' (current project) or 'all'"),
@@ -64,14 +73,7 @@ export const parameters = z.object({
 		.strict()
 		.optional()
 		.describe("named SQL parameter bindings for a single statement"),
-	export_to: z
-		.object({
-			path: z.string().min(1).describe("absolute file path outside the omp sessions directory"),
-			format: z.enum(["parquet", "csv", "json"]).describe("output file format"),
-		})
-		.strict()
-		.optional()
-		.describe("write query result to a file instead of returning rows"),
+	export_to: exportTo,
 });
 
 const strictParameters = parameters.strict();
@@ -412,16 +414,30 @@ function summary(isExport: boolean, result: Details): string {
 	);
 }
 
+function hasExportToArg(value: unknown): boolean {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		"export_to" in value &&
+		(value as { export_to?: unknown }).export_to !== undefined
+	);
+}
+
+const exportApprovalProbe = omompTool({
+	name: TOOL,
+	parameters: z.object({ export_to: exportTo }),
+	execute(_id: unknown, params: unknown): boolean {
+		return hasExportToArg(params);
+	},
+});
+
 /** Writing an export file needs write approval; SQL queries only read session files. */
 export function approval(args: unknown): "read" | "write" {
 	try {
-		const request = parseRequest(args);
-		return request.export_to !== undefined ? "write" : "read";
+		return exportApprovalProbe.execute("approval", args) ? "write" : "read";
 	} catch {
-		if (args !== null && typeof args === "object" && "export_to" in args && (args as { export_to?: unknown }).export_to !== undefined) {
-			return "write";
-		}
-		return "read";
+		return hasExportToArg(args) ? "write" : "read";
 	}
 }
 
@@ -442,13 +458,7 @@ export function sessionQueryTool(
 			try {
 				request = parseRequest(rawParams);
 			} catch (error) {
-				const opName =
-					rawParams !== null &&
-					typeof rawParams === "object" &&
-					"export_to" in rawParams &&
-					(rawParams as { export_to?: unknown }).export_to !== undefined
-						? "export"
-						: "sql";
+				const opName = hasExportToArg(rawParams) ? "export" : "sql";
 				return { content: [{ type: "text", text: `session_query ${opName} failed: ${failureText(error)}` }], isError: true };
 			}
 			const opName = request.export_to ? "export" : "sql";

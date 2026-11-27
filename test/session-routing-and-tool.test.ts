@@ -196,7 +196,16 @@ describe("session_query refactored schema and topic", () => {
 
 	test("approval is read for queries and write for export_to", () => {
 		expect(approval({ query: "SELECT 1" })).toBe("read");
+		expect(approval({ query: "SELECT 1", export_to: null })).toBe("read");
+		expect(approval({ query: "SELECT 1", export_to: {} })).toBe("read");
+		expect(approval({ query: "SELECT 1", export_to: { path: "   ", format: "   " } })).toBe("read");
+		expect(approval({ query: "SELECT 1", export_to: { path: "", format: null } })).toBe("read");
+		expect(approval({ query: "SELECT 1", sids: [], export_to: {} })).toBe("read");
+		expect(approval(null)).toBe("read");
 		expect(approval({ query: "SELECT 1", export_to: { path: "/tmp/out.csv", format: "csv" } })).toBe("write");
+		expect(approval({ query: "SELECT 1", sids: [], export_to: { path: "/tmp/out.csv", format: "csv" } })).toBe("write");
+		expect(approval({ query: "SELECT 1", export_to: { path: "/tmp/out.csv" } })).toBe("write");
+		expect(approval({ query: "SELECT 1", export_to: { path: "   ", format: "csv" } })).toBe("write");
 	});
 
 	test("registers help://session_query/sql via registerToolTopics and native docTopics", () => {
