@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-28
+
 ### Breaking Changes
 
 - `session_query.params` changes from a named scalar map to `{ bindings: [{ key, kind, text?, number?, boolean? }] }`, with `kind: "null"` for SQL `NULL` and `kind: "empty_text"` for an empty string, so SQL `NULL`, an empty string, `false` and `0` remain expressible when empty argument values are omitted; `agent_scope: "root_only"` replaces `agents: []` for root transcripts only.
